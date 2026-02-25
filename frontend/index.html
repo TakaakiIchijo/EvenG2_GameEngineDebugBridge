@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Even G2 Debug Bridge</title>
+  <style>
+    body {
+      margin: 0;
+      background: #0f172a;
+      color: #e2e8f0;
+      font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+      font-size: 14px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+    .container {
+      width: 100%;
+      max-width: 480px;
+      padding: 24px 16px;
+      box-sizing: border-box;
+    }
+    h1 {
+      font-size: 1.1rem;
+      color: #38bdf8;
+      margin: 0 0 4px;
+      letter-spacing: 0.5px;
+    }
+    .subtitle {
+      font-size: 0.78rem;
+      color: #64748b;
+      margin: 0 0 20px;
+    }
+    .status-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      background: #1e293b;
+      border-radius: 8px;
+      margin-bottom: 16px;
+      font-size: 0.82rem;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .dot.connected  { background: #4ade80; box-shadow: 0 0 6px #4ade80; }
+    .dot.connecting { background: #fb923c; animation: blink 1s infinite; }
+    .dot.error      { background: #f87171; }
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.25; }
+    }
+    .g2-status-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      background: #1e293b;
+      border-radius: 8px;
+      margin-bottom: 16px;
+      font-size: 0.82rem;
+    }
+    .log-preview {
+      background: #1e293b;
+      border-radius: 8px;
+      padding: 12px 14px;
+      font-size: 0.8rem;
+      color: #94a3b8;
+      min-height: 60px;
+    }
+    .log-preview .label {
+      color: #475569;
+      font-size: 0.72rem;
+      margin-bottom: 6px;
+    }
+    .log-preview .message {
+      color: #e2e8f0;
+      word-break: break-all;
+    }
+    .log-preview .level-warning { color: #fbbf24; }
+    .log-preview .level-error   { color: #f87171; }
+    .log-preview .level-log     { color: #e2e8f0; }
+    .log-count {
+      font-size: 0.72rem;
+      color: #475569;
+      text-align: right;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Even G2 Debug Bridge</h1>
+    <p class="subtitle">ゲームエンジンのデバッグログをスマートグラスに表示</p>
+
+    <div class="status-bar">
+      <div class="dot connecting" id="server-dot"></div>
+      <span id="server-status">サーバーに接続中...</span>
+    </div>
+
+    <div class="g2-status-bar">
+      <div class="dot connecting" id="g2-dot"></div>
+      <span id="g2-status">G2 に接続中...</span>
+    </div>
+
+    <div class="log-preview">
+      <div class="label">最新ログ</div>
+      <div class="message" id="latest-log">ログ待機中...</div>
+    </div>
+    <div class="log-count" id="log-count">受信ログ: 0 件</div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

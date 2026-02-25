@@ -1,0 +1,55 @@
+**/node_modules
+**/dist
+**/obj
+**/bin
+
+# Unity
+/[Ll]ibrary/
+/[Tt]emp/
+/[Oo]bj/
+/[Bb]uild/
+/[Bb]uilds/
+/[Ll]ogs/
+/[Uu]ser[Ss]ettings/
+
+# MemoryCaptures can be huge
+/[Mm]emoryCaptures/
+
+# Asset meta files should only be ignored when the asset is also ignored
+!/[Aa]ssets/**/*.meta
+
+# Visual Studio / Rider
+.vs/
+.vscode/
+*.csproj
+*.unityproj
+*.sln
+*.suo
+*.tmp
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+# Python
+__pycache__/
+*.pyc
+.env
+.venv
+venv/
+ENV/
+env/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Others
+*.log
+*.orig

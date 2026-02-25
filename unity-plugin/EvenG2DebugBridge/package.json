@@ -1,0 +1,18 @@
+{
+  "name": "com.evenrealities.g2debugbridge",
+  "version": "1.0.0",
+  "displayName": "Even G2 Debug Bridge",
+  "description": "Forwards tagged Unity console logs ([Even]) to Even G2 smart glasses via a local Python server. Designed for game exhibitions and playtests.",
+  "unity": "2021.3",
+  "author": {
+    "name": "TakaakiIchijo"
+  },
+  "keywords": ["even-g2", "smart-glasses", "debug", "logging"],
+  "samples": [
+    {
+      "displayName": "Basic Sample",
+      "description": "A minimal scene demonstrating [Even] tagged log output.",
+      "path": "Samples~/BasicSample"
+    }
+  ]
+}

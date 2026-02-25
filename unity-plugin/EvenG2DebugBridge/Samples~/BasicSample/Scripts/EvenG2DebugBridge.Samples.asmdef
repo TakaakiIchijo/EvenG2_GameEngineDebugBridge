@@ -1,0 +1,16 @@
+{
+    "name": "EvenG2DebugBridge.Samples",
+    "rootNamespace": "EvenG2DebugBridge.Samples",
+    "references": [
+        "EvenG2DebugBridge.Runtime"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
