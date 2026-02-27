@@ -31,6 +31,12 @@
 - スマートフォンにEven Hubアプリ
 
 ### 1. ローカルサーバーの起動
+venvで環境を作ります。
+
+```bash
+py -m venv ~/evendebug
+source ~/evendebug/bin/activate
+```
 
 `server` ディレクトリに移動し、サーバーを起動します。
 
@@ -105,6 +111,12 @@ The system consists of three main components:
 - Even Hub app on your smartphone
 
 ### 1. Run the Local Server
+Create environment with venv:
+
+```bash
+py -m venv ~/evendebug
+source ~/evendebug/bin/activate
+```
 
 Navigate to the `server` directory and start the server:
 
