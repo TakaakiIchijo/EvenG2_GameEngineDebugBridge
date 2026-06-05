@@ -4,6 +4,9 @@ Even G2 Debug Bridge - ローカルサーバー
 ゲームエンジン（Unity / Unreal / Godot など）から WebSocket 経由でログを受信し、
 Even G2 Webアプリケーションにリアルタイムで配信するブリッジサーバー。
 
+本サーバーはゲームエンジン固有の情報に依存しない。
+Unity / Unreal / Godot のいずれからでも同一プロトコルで接続できる。
+
 起動方法:
     pip install -r requirements.txt
     python server.py
@@ -11,6 +14,20 @@ Even G2 Webアプリケーションにリアルタイムで配信するブリッ
 環境変数 (省略可):
     HTTP_PORT  : HTTPサーバーのポート番号 (デフォルト: 8765)
     WS_PORT    : WebSocketサーバーのポート番号 (デフォルト: 8766)
+
+プロトコル:
+    接続後、最初のメッセージで種別を宣言する。
+    ゲームエンジン側: {"type": "engine"}
+    Webアプリ側:      {"type": "browser"}
+
+    ログメッセージ形式 (エンジン -> サーバー):
+    {
+        "type":      "log",
+        "level":     "Log" | "Warning" | "Error" | "Exception",
+        "message":   "<ログ本文>",
+        "timestamp": "HH:MM:SS",
+        "tag":       "[Even]"
+    }
 """
 
 import asyncio
@@ -30,7 +47,7 @@ import websockets
 # ---------------------------------------------------------------------------
 HTTP_PORT = int(os.environ.get("HTTP_PORT", 8765))
 WS_PORT = int(os.environ.get("WS_PORT", 8766))
-LOG_BUFFER_SIZE = 50  # グラスに配信するログの最大保持件数
+LOG_BUFFER_SIZE = 50  # Webアプリに配信するログの最大保持件数
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend" / "dist"
 
 logging.basicConfig(
@@ -103,18 +120,21 @@ async def handle_engine_client(websocket) -> None:
     logger.info("ゲームエンジン接続: %s", remote)
 
     # 接続確認レスポンスを返す
-    await websocket.send(json.dumps({"type": "connected", "message": "Even G2 Debug Bridge に接続しました"}))
+    await websocket.send(json.dumps({
+        "type": "connected",
+        "message": "Even G2 Debug Bridge に接続しました",
+    }))
 
     try:
         async for message_raw in websocket:
             try:
                 message = json.loads(message_raw)
                 log_entry = {
-                    "type": "log",
-                    "level": message.get("level", "Log"),
-                    "message": message.get("message", ""),
+                    "type":      "log",
+                    "level":     message.get("level", "Log"),
+                    "message":   message.get("message", ""),
                     "timestamp": message.get("timestamp", ""),
-                    "tag": message.get("tag", ""),
+                    "tag":       message.get("tag", ""),
                 }
                 log_buffer.append(log_entry)
                 logger.info("[Engine Log] [%s] %s", log_entry["level"], log_entry["message"])
@@ -215,7 +235,7 @@ async def main() -> None:
         logger.info("  WebSocket (ゲームエンジン/ブラウザ): ws://%s:%d", local_ip, WS_PORT)
         logger.info("  Even G2 Webアプリ (HTTP):           http://%s:%d", local_ip, HTTP_PORT)
         logger.info("")
-        logger.info("  Unity Editorプラグインの接続先URL:")
+        logger.info("  ゲームエンジンプラグインの接続先URL:")
         logger.info("    ws://%s:%d", local_ip, WS_PORT)
         logger.info("")
         logger.info("  スマートフォンのEven HubアプリでアクセスするURL:")
