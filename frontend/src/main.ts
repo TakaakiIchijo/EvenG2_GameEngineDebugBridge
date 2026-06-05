@@ -45,15 +45,18 @@ interface LogEntry {
 let receivedCount = 0
 
 // ---------------------------------------------------------------------------
-// Even G2 初期化
+// Even G2 初期化（SDK 0.0.10: detail メッセージを UI に反映）
 // ---------------------------------------------------------------------------
-initG2((connected) => {
+initG2((connected, detail) => {
   if (connected) {
     g2Dot.className = 'dot connected'
-    g2Status.textContent = 'G2 に接続しました'
+    g2Status.textContent = detail ?? 'G2 に接続しました'
   } else {
-    g2Dot.className = 'dot error'
-    g2Status.textContent = 'G2 への接続に失敗しました（Simulator または Even Hub アプリで開いてください）'
+    // connectionFailed / Disconnected / Connecting など詳細状態を表示
+    const isConnecting = detail?.includes('接続中')
+    g2Dot.className = isConnecting ? 'dot connecting' : 'dot error'
+    g2Status.textContent =
+      detail ?? 'G2 への接続に失敗しました（Simulator または Even Hub アプリで開いてください）'
   }
 })
 
