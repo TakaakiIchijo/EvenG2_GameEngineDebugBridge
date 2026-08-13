@@ -1,132 +1,157 @@
-/**
- * main.ts
- * Even G2 Debug Bridge フロントエンドのエントリポイント。
- *
- * 役割:
- *   1. Python ローカルサーバーに WebSocket で接続し、ログを受信する。
- *   2. 受信したログを Even G2 スマートグラスに表示する。
- *   3. ブラウザ UI のステータスを更新する。
- */
+import { disposeG2, initG2, queueLogForG2, type G2ConnectionState } from './g2-display'
 
-import { initG2, displayLogOnG2 } from './g2-display'
-
-// ---------------------------------------------------------------------------
-// 設定
-// ---------------------------------------------------------------------------
-// サーバーの WebSocket ポートを URL パラメータから取得（デフォルト: 8766）
-const params = new URLSearchParams(window.location.search)
-const WS_PORT = params.get('wsPort') ?? '8766'
-const WS_HOST = window.location.hostname
-const WS_URL = `ws://${WS_HOST}:${WS_PORT}`
-
-const RECONNECT_INTERVAL_MS = 3000
-
-// ---------------------------------------------------------------------------
-// DOM 参照
-// ---------------------------------------------------------------------------
-const serverDot = document.getElementById('server-dot')!
-const serverStatus = document.getElementById('server-status')!
-const g2Dot = document.getElementById('g2-dot')!
-const g2Status = document.getElementById('g2-status')!
-const latestLog = document.getElementById('latest-log')!
-const logCount = document.getElementById('log-count')!
-
-// ---------------------------------------------------------------------------
-// 状態
-// ---------------------------------------------------------------------------
 interface LogEntry {
-  type: string
+  type: 'log'
   level: string
   message: string
   timestamp: string
   tag: string
+  protocol_version?: number
 }
+
+interface HistoryPayload {
+  type: 'history'
+  logs: LogEntry[]
+}
+
+interface StatusPayload {
+  type: 'status'
+  status: string
+  detail?: string
+}
+
+const params = new URLSearchParams(window.location.search)
+const wsPort = params.get('wsPort') ?? '8766'
+const wsUrl = params.get('wsUrl') ?? `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.hostname}:${wsPort}`
+const reconnectBaseMs = 1000
+const reconnectMaxMs = 10000
+
+const serverDot = document.querySelector<HTMLElement>('#server-dot')
+const serverStatus = document.querySelector<HTMLElement>('#server-status')
+const g2Dot = document.querySelector<HTMLElement>('#g2-dot')
+const g2Status = document.querySelector<HTMLElement>('#g2-status')
+const latestLog = document.querySelector<HTMLElement>('#latest-log')
+const logCount = document.querySelector<HTMLElement>('#log-count')
 
 let receivedCount = 0
+let reconnectAttempts = 0
+let reconnectTimer: number | null = null
+let activeSocket: WebSocket | null = null
+let stopped = false
 
-// ---------------------------------------------------------------------------
-// Even G2 初期化（SDK 0.0.10: detail メッセージを UI に反映）
-// ---------------------------------------------------------------------------
-initG2((connected, detail) => {
-  if (connected) {
-    g2Dot.className = 'dot connected'
-    g2Status.textContent = detail ?? 'G2 に接続しました'
-  } else {
-    // connectionFailed / Disconnected / Connecting など詳細状態を表示
-    const isConnecting = detail?.includes('接続中')
-    g2Dot.className = isConnecting ? 'dot connecting' : 'dot error'
-    g2Status.textContent =
-      detail ?? 'G2 への接続に失敗しました（Simulator または Even Hub アプリで開いてください）'
+function setStatus(
+  dot: HTMLElement | null,
+  text: HTMLElement | null,
+  state: 'connected' | 'connecting' | 'error',
+  detail: string,
+): void {
+  if (dot) {
+    dot.className = `dot ${state}`
   }
-})
-
-// ---------------------------------------------------------------------------
-// WebSocket 接続（サーバーへの接続）
-// ---------------------------------------------------------------------------
-function connectToServer(): void {
-  serverDot.className = 'dot connecting'
-  serverStatus.textContent = `サーバーに接続中... (${WS_URL})`
-
-  const ws = new WebSocket(WS_URL)
-
-  ws.onopen = () => {
-    // ブラウザクライアントとして自己紹介
-    ws.send(JSON.stringify({ type: 'browser' }))
-    serverDot.className = 'dot connected'
-    serverStatus.textContent = 'サーバーに接続しました'
-  }
-
-  ws.onmessage = async (event) => {
-    try {
-      const data = JSON.parse(event.data as string)
-
-      if (data.type === 'log') {
-        await handleLogEntry(data as LogEntry)
-      } else if (data.type === 'history') {
-        // 接続時に受信する過去ログ（最新の1件のみ表示）
-        const logs: LogEntry[] = data.logs ?? []
-        if (logs.length > 0) {
-          const latest = logs[logs.length - 1]
-          await handleLogEntry(latest)
-          receivedCount = logs.length
-          updateLogCount()
-        }
-      }
-    } catch (e) {
-      console.error('メッセージの解析に失敗しました:', e)
-    }
-  }
-
-  ws.onclose = () => {
-    serverDot.className = 'dot connecting'
-    serverStatus.textContent = `サーバーから切断されました。再接続中... (${RECONNECT_INTERVAL_MS / 1000}秒後)`
-    setTimeout(connectToServer, RECONNECT_INTERVAL_MS)
-  }
-
-  ws.onerror = () => {
-    serverDot.className = 'dot error'
-    serverStatus.textContent = `サーバーへの接続に失敗しました (${WS_URL})`
+  if (text) {
+    text.textContent = detail
   }
 }
 
-// ---------------------------------------------------------------------------
-// ログ処理
-// ---------------------------------------------------------------------------
-async function handleLogEntry(entry: LogEntry): Promise<void> {
-  receivedCount++
+function updateG2Status(state: G2ConnectionState, detail: string): void {
+  const visualState = state === 'connected' || state === 'ready'
+    ? 'connected'
+    : state === 'connecting'
+      ? 'connecting'
+      : 'error'
+  setStatus(g2Dot, g2Status, visualState, detail)
+}
+
+function connectToServer(): void {
+  if (stopped) {
+    return
+  }
+
+  setStatus(serverDot, serverStatus, 'connecting', `サーバーに接続中... (${wsUrl})`)
+
+  const socket = new WebSocket(wsUrl)
+  activeSocket = socket
+
+  socket.addEventListener('open', () => {
+    if (socket !== activeSocket) {
+      return
+    }
+    socket.send(JSON.stringify({ type: 'browser', protocol_version: 1 }))
+    reconnectAttempts = 0
+    setStatus(serverDot, serverStatus, 'connected', 'サーバーに接続しました')
+  })
+
+  socket.addEventListener('message', event => {
+    try {
+      handleServerMessage(JSON.parse(String(event.data)))
+    } catch (error) {
+      console.error('[Bridge] サーバーメッセージの解析に失敗しました', error)
+    }
+  })
+
+  socket.addEventListener('error', () => {
+    if (socket === activeSocket) {
+      setStatus(serverDot, serverStatus, 'error', `サーバーへの接続に失敗しました (${wsUrl})`)
+    }
+  })
+
+  socket.addEventListener('close', () => {
+    if (socket !== activeSocket || stopped) {
+      return
+    }
+    activeSocket = null
+    scheduleReconnect()
+  })
+}
+
+function handleServerMessage(payload: unknown): void {
+  if (!payload || typeof payload !== 'object' || !('type' in payload)) {
+    console.warn('[Bridge] 不正なサーバーメッセージを無視しました', payload)
+    return
+  }
+
+  const typedPayload = payload as { type: string }
+  if (typedPayload.type === 'log') {
+    handleLogEntry(typedPayload as LogEntry)
+    return
+  }
+
+  if (typedPayload.type === 'history') {
+    const history = typedPayload as HistoryPayload
+    receivedCount = history.logs.length
+    updateLogCount()
+    const latest = history.logs.length > 0 ? history.logs[history.logs.length - 1] : undefined
+    if (latest) {
+      updateBrowserPreview(latest)
+      queueLogForG2(latest.level, latest.message, latest.timestamp)
+    }
+    return
+  }
+
+  if (typedPayload.type === 'status') {
+    const status = typedPayload as StatusPayload
+    console.warn(`[Bridge] サーバー通知: ${status.status}${status.detail ? ` (${status.detail})` : ''}`)
+  }
+}
+
+function handleLogEntry(entry: LogEntry): void {
+  receivedCount += 1
   updateLogCount()
+  updateBrowserPreview(entry)
+  queueLogForG2(entry.level, entry.message, entry.timestamp)
+}
 
-  // ブラウザ UI を更新
-  const levelClass = getLevelClass(entry.level)
-  latestLog.className = `message ${levelClass}`
-  latestLog.textContent = `[${entry.level}] ${entry.message}`
-
-  // Even G2 に表示
-  await displayLogOnG2(entry.level, entry.message, entry.timestamp)
+function updateBrowserPreview(entry: LogEntry): void {
+  if (latestLog) {
+    latestLog.className = `message ${getLevelClass(entry.level)}`
+    latestLog.textContent = `[${entry.level}] ${entry.message}`
+  }
 }
 
 function updateLogCount(): void {
-  logCount.textContent = `受信ログ: ${receivedCount} 件`
+  if (logCount) {
+    logCount.textContent = `受信ログ: ${receivedCount} 件`
+  }
 }
 
 function getLevelClass(level: string): string {
@@ -142,7 +167,21 @@ function getLevelClass(level: string): string {
   }
 }
 
-// ---------------------------------------------------------------------------
-// 起動
-// ---------------------------------------------------------------------------
+function scheduleReconnect(): void {
+  reconnectAttempts += 1
+  const delay = Math.min(reconnectBaseMs * 2 ** (reconnectAttempts - 1), reconnectMaxMs)
+  setStatus(serverDot, serverStatus, 'connecting', `サーバーから切断されました。${Math.ceil(delay / 1000)}秒後に再接続します`)
+  reconnectTimer = window.setTimeout(connectToServer, delay)
+}
+
+window.addEventListener('beforeunload', () => {
+  stopped = true
+  if (reconnectTimer !== null) {
+    window.clearTimeout(reconnectTimer)
+  }
+  activeSocket?.close()
+  disposeG2()
+})
+
+void initG2(updateG2Status)
 connectToServer()

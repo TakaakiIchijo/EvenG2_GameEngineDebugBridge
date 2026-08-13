@@ -1,219 +1,257 @@
-/**
- * g2-display.ts
- * Even G2 スマートグラスへのログ表示ロジック。
- *
- * SDK 0.0.10 対応:
- *   - onLaunchSource()       : 起動元（appMenu / glassesMenu）をコンソールに記録
- *   - DeviceConnectType      : connectionFailed を含む詳細な接続状態を判定
- *   - ShutDownContaniner     : 型安全なシャットダウン呼び出し
- *   - EvenHubErrorCodeName   : createStartUpPageContainer の失敗理由を詳細ログに記録
- *
- * ページライフサイクルの原則:
- *   - 未初期化時: createStartUpPageContainer を使用
- *   - 初期化済み: rebuildPageContainer を使用
- * この使い分けを initialized フラグで管理する。
- */
-
 import {
-  waitForEvenAppBridge,
-  EvenAppBridge,
   CreateStartUpPageContainer,
-  RebuildPageContainer,
-  TextContainerProperty,
-  StartUpPageCreateResult,
-  OsEventTypeList,
   DeviceConnectType,
-  ShutDownContaniner,
-  EvenHubErrorCodeName,
+  EvenAppBridge,
+  OsEventTypeList,
+  StartUpPageCreateResult,
+  TextContainerProperty,
+  TextContainerUpgrade,
+  waitForEvenAppBridge,
   type LaunchSource,
 } from '@evenrealities/even_hub_sdk'
 
-// ---------------------------------------------------------------------------
-// 定数
-// ---------------------------------------------------------------------------
-const G2_WIDTH = 576
-const G2_HEIGHT = 288
-const CONTAINER_ID = 1
-const CONTAINER_NAME = 'debug-log'
-const MAX_DISPLAY_CHARS = 900  // BLE 900バイト制限に対応した安全な上限
+const DISPLAY_WIDTH = 576
+const DISPLAY_HEIGHT = 288
+const LOG_CONTAINER_ID = 1
+const LOG_CONTAINER_NAME = 'debug-log'
+const MAX_G2_CONTENT_BYTES = 880
+const DISPLAY_INTERVAL_MS = 250
 
-// ---------------------------------------------------------------------------
-// 状態
-// ---------------------------------------------------------------------------
+export type G2ConnectionState = 'ready' | 'connecting' | 'connected' | 'disconnected' | 'failed'
+
+type StatusListener = (state: G2ConnectionState, detail: string) => void
+
+interface PendingLog {
+  level: string
+  message: string
+  timestamp: string
+}
+
 interface G2State {
-  initialized: boolean
   bridge: EvenAppBridge | null
-  onStatusChange: ((connected: boolean, detail?: string) => void) | null
-  launchSource: LaunchSource | null
+  pageCreated: boolean
+  pendingLog: PendingLog | null
+  renderTimer: number | null
+  lastRenderAt: number
+  statusListener: StatusListener | null
+  unsubscribeLaunchSource: (() => void) | null
+  unsubscribeDeviceStatus: (() => void) | null
+  unsubscribeHubEvents: (() => void) | null
 }
 
 const state: G2State = {
-  initialized: false,
   bridge: null,
-  onStatusChange: null,
-  launchSource: null,
+  pageCreated: false,
+  pendingLog: null,
+  renderTimer: null,
+  lastRenderAt: 0,
+  statusListener: null,
+  unsubscribeLaunchSource: null,
+  unsubscribeDeviceStatus: null,
+  unsubscribeHubEvents: null,
 }
 
-// ---------------------------------------------------------------------------
-// 公開 API
-// ---------------------------------------------------------------------------
+/** Even App WebViewブリッジを初期化し、G2の接続状態を監視する。 */
+export async function initG2(onStatusChange: StatusListener): Promise<void> {
+  disposeG2()
+  state.statusListener = onStatusChange
+  notifyStatus('connecting', 'Even App ブリッジに接続中...')
 
-/**
- * Even G2 ブリッジを初期化する。
- * Even Hub アプリ（または Simulator）が WebView を注入するまで待機する。
- *
- * @param onStatusChange 接続状態変化時のコールバック。detail に詳細メッセージを渡す。
- */
-export async function initG2(
-  onStatusChange: (connected: boolean, detail?: string) => void,
-): Promise<void> {
-  state.onStatusChange = onStatusChange
   try {
     const bridge = await waitForEvenAppBridge()
     state.bridge = bridge
 
-    // ---- SDK 0.0.10: 起動元の記録 ----------------------------------------
-    bridge.onLaunchSource((source: LaunchSource) => {
-      state.launchSource = source
-      console.log(`[G2] 起動元: ${source}`)
+    // 起動元イベントはロード後に1回だけ届くため、ブリッジ取得直後に購読する。
+    state.unsubscribeLaunchSource = bridge.onLaunchSource((source: LaunchSource) => {
+      console.info(`[G2] 起動元: ${source}`)
     })
 
-    // ---- SDK 0.0.10: 詳細な接続状態の監視 -----------------------------------
-    bridge.onDeviceStatusChanged((status) => {
-      switch (status.connectType) {
+    state.unsubscribeDeviceStatus = bridge.onDeviceStatusChanged((device) => {
+      switch (device.connectType) {
         case DeviceConnectType.Connected:
-          onStatusChange(true, 'G2 に接続しました')
+          notifyStatus('connected', `G2 に接続しました${formatBattery(device.batteryLevel)}`)
           break
         case DeviceConnectType.Connecting:
-          onStatusChange(false, 'G2 に接続中...')
+          notifyStatus('connecting', 'G2 に接続中...')
           break
         case DeviceConnectType.ConnectionFailed:
-          // SDK 0.0.10 で追加された connectionFailed を明示的に処理
-          onStatusChange(false, 'G2 への接続に失敗しました')
-          console.warn('[G2] 接続失敗 (connectionFailed)')
+          state.pageCreated = false
+          notifyStatus('failed', 'G2 への接続に失敗しました')
           break
         case DeviceConnectType.Disconnected:
-          onStatusChange(false, 'G2 との接続が切断されました')
-          state.initialized = false  // 切断時は初期化状態をリセット
+          state.pageCreated = false
+          notifyStatus('disconnected', 'G2 との接続が切断されました')
           break
         default:
           break
       }
     })
 
-    // ---- ダブルクリックでアプリを終了 ----------------------------------------
-    bridge.onEvenHubEvent((event) => {
-      if (event.sysEvent?.eventType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
-        // SDK 0.0.10: ShutDownContaniner 型を使った型安全な呼び出し
-        const shutDown = new ShutDownContaniner({ exitMode: 0 })
-        bridge.shutDownPageContainer(shutDown.exitMode)
+    state.unsubscribeHubEvents = bridge.onEvenHubEvent((event) => {
+      const sysType = eventTypeOf(event.sysEvent)
+      const textType = eventTypeOf(event.textEvent)
+
+      if (
+        sysType === OsEventTypeList.DOUBLE_CLICK_EVENT ||
+        textType === OsEventTypeList.DOUBLE_CLICK_EVENT
+      ) {
+        void closePage(bridge)
+        return
+      }
+
+      if (
+        sysType === OsEventTypeList.SYSTEM_EXIT_EVENT ||
+        sysType === OsEventTypeList.ABNORMAL_EXIT_EVENT
+      ) {
+        state.pageCreated = false
       }
     })
 
-    onStatusChange(true, 'G2 ブリッジに接続しました')
-  } catch (e) {
-    console.error('[G2] ブリッジの初期化に失敗しました:', e)
-    onStatusChange(false, 'G2 ブリッジの初期化に失敗しました（Simulator または Even Hub アプリで開いてください）')
+    notifyStatus('ready', 'Even App ブリッジの準備ができました')
+    await ensurePage(bridge, 'ログ待機中...')
+  } catch (error) {
+    console.error('[G2] ブリッジの初期化に失敗しました', error)
+    notifyStatus('failed', 'Even App または Simulator 上で開いてください')
   }
 }
 
 /**
- * ログメッセージを Even G2 に表示する。
- * 文字数が上限を超える場合は末尾を切り捨て、省略記号を付与する。
+ * 最新ログを表示待ちキューへ登録する。
+ * 高頻度入力では中間ログを破棄し、最大4回/秒で最新ログだけをグラスへ送る。
  */
-export async function displayLogOnG2(
-  level: string,
-  message: string,
-  timestamp: string,
-): Promise<void> {
-  const { bridge } = state
-  if (!bridge) return
+export function queueLogForG2(level: string, message: string, timestamp: string): void {
+  state.pendingLog = { level, message, timestamp }
+  schedulePendingRender()
+}
 
-  // 表示テキストを組み立てる
-  const levelLabel = formatLevel(level)
-  const header = `${levelLabel} ${timestamp}\n`
-  const body = message
-  let content = header + body
-
-  // BLE 900バイト制限: 文字数制限を超える場合は切り詰める
-  if (content.length > MAX_DISPLAY_CHARS) {
-    content = content.slice(0, MAX_DISPLAY_CHARS - 3) + '...'
+/** WebView離脱時のイベント購読とタイマーを解放する。 */
+export function disposeG2(): void {
+  if (state.renderTimer !== null) {
+    window.clearTimeout(state.renderTimer)
   }
 
-  const textProp = new TextContainerProperty({
+  state.renderTimer = null
+  state.pendingLog = null
+  state.pageCreated = false
+  state.unsubscribeLaunchSource?.()
+  state.unsubscribeDeviceStatus?.()
+  state.unsubscribeHubEvents?.()
+  state.unsubscribeLaunchSource = null
+  state.unsubscribeDeviceStatus = null
+  state.unsubscribeHubEvents = null
+  state.bridge = null
+}
+
+function schedulePendingRender(): void {
+  if (state.renderTimer !== null) {
+    return
+  }
+
+  const delay = Math.max(0, DISPLAY_INTERVAL_MS - (Date.now() - state.lastRenderAt))
+  state.renderTimer = window.setTimeout(() => {
+    state.renderTimer = null
+    void flushPendingLog()
+  }, delay)
+}
+
+async function flushPendingLog(): Promise<void> {
+  const pending = state.pendingLog
+  state.pendingLog = null
+
+  if (!pending || !state.bridge) {
+    return
+  }
+
+  const content = fitUtf8(`${formatLevel(pending.level)} ${pending.timestamp}\n${pending.message}`, MAX_G2_CONTENT_BYTES)
+
+  try {
+    const pageReady = await ensurePage(state.bridge, content)
+    if (pageReady) {
+      const updated = await state.bridge.textContainerUpgrade(
+        new TextContainerUpgrade({
+          containerID: LOG_CONTAINER_ID,
+          containerName: LOG_CONTAINER_NAME,
+          content,
+        }),
+      )
+
+      if (!updated) {
+        console.warn('[G2] テキスト更新に失敗しました。次回はページを再作成します。')
+        state.pageCreated = false
+      }
+    }
+  } catch (error) {
+    console.error('[G2] ログ表示に失敗しました', error)
+    state.pageCreated = false
+  } finally {
+    state.lastRenderAt = Date.now()
+    if (state.pendingLog) {
+      schedulePendingRender()
+    }
+  }
+}
+
+async function ensurePage(bridge: EvenAppBridge, initialContent: string): Promise<boolean> {
+  if (state.pageCreated) {
+    return true
+  }
+
+  const textContainer = new TextContainerProperty({
     xPosition: 0,
     yPosition: 0,
-    width: G2_WIDTH,
-    height: G2_HEIGHT,
+    width: DISPLAY_WIDTH,
+    height: DISPLAY_HEIGHT,
     borderWidth: 0,
     borderColor: 5,
     paddingLength: 6,
-    containerID: CONTAINER_ID,
-    containerName: CONTAINER_NAME,
-    content,
+    containerID: LOG_CONTAINER_ID,
+    containerName: LOG_CONTAINER_NAME,
+    content: fitUtf8(initialContent, MAX_G2_CONTENT_BYTES),
     isEventCapture: 1,
   })
 
-  await renderPage(bridge, textProp)
+  const result = await bridge.createStartUpPageContainer(
+    new CreateStartUpPageContainer({
+      containerTotalNum: 1,
+      textObject: [textContainer],
+    }),
+  )
+
+  if (result !== StartUpPageCreateResult.success) {
+    console.warn('[G2] 初期ページの作成に失敗しました', result)
+    state.pageCreated = false
+    return false
+  }
+
+  state.pageCreated = true
+  return true
 }
 
-// ---------------------------------------------------------------------------
-// 内部関数
-// ---------------------------------------------------------------------------
-
-/**
- * ページを描画する。
- * initialized フラグに応じて create / rebuild を使い分ける。
- */
-async function renderPage(bridge: EvenAppBridge, textProp: TextContainerProperty): Promise<void> {
-  if (!state.initialized) {
-    const page = new CreateStartUpPageContainer({
-      containerTotalNum: 1,
-      textObject: [textProp],
-    })
-    const result = await bridge.createStartUpPageContainer(page)
-
-    // SDK 0.0.10: EvenHubErrorCodeName を使った詳細なエラーログ
-    if (result === StartUpPageCreateResult.success) {
-      state.initialized = true
-    } else if (result === StartUpPageCreateResult.oversize) {
-      console.warn(
-        `[G2] createStartUpPageContainer 失敗: ${EvenHubErrorCodeName.APP_REQUEST_CREATE_OVERSIZE_RESPONSE_CONTAINER}`,
-      )
-    } else if (result === StartUpPageCreateResult.outOfMemory) {
-      console.warn(
-        `[G2] createStartUpPageContainer 失敗: ${EvenHubErrorCodeName.APP_REQUEST_CREATE_OUTOFMEMORY_CONTAINER}`,
-      )
-    } else if (result === StartUpPageCreateResult.invalid) {
-      console.warn(
-        `[G2] createStartUpPageContainer 失敗: ${EvenHubErrorCodeName.APP_REQUEST_CREATE_INVAILD_CONTAINER}`,
-      )
-    }
-
-    // ナレッジ: rebuildPageContainer の戻り値が false でもレイアウトが適用される場合があるため、
-    // initialized が true でなくても次回以降は rebuild を試みる。
-    // ただし、oversize / outOfMemory の場合は initialized をリセットしない（再試行しない）。
-  } else {
-    const page = new RebuildPageContainer({
-      containerTotalNum: 1,
-      textObject: [textProp],
-    })
-    const rebuildResult = await bridge.rebuildPageContainer(page)
-
-    // SDK 0.0.10: rebuild 失敗時のエラーログ
-    if (!rebuildResult) {
-      console.warn(
-        `[G2] rebuildPageContainer 失敗: ${EvenHubErrorCodeName.APP_REQUEST_REBUILD_PAGE_FAILD}`,
-      )
-      // 失敗時は次回 create から再試行する
-      state.initialized = false
-    }
+async function closePage(bridge: EvenAppBridge): Promise<void> {
+  try {
+    await bridge.shutDownPageContainer(1)
+  } finally {
+    state.pageCreated = false
+    disposeG2()
   }
 }
 
-/**
- * ログレベルを G2 表示用のラベルに変換する。
- */
+function eventTypeOf(envelope?: { eventType?: OsEventTypeList }): OsEventTypeList | null {
+  if (!envelope) {
+    return null
+  }
+  // CLICK_EVENTは0であり、SDKのイベントエンベロープでは省略される場合がある。
+  return envelope.eventType ?? OsEventTypeList.CLICK_EVENT
+}
+
+function notifyStatus(connectionState: G2ConnectionState, detail: string): void {
+  state.statusListener?.(connectionState, detail)
+}
+
+function formatBattery(level: number | undefined): string {
+  return typeof level === 'number' ? `（バッテリー ${level}%）` : ''
+}
+
 function formatLevel(level: string): string {
   switch (level.toLowerCase()) {
     case 'error':
@@ -225,4 +263,20 @@ function formatLevel(level: string): string {
     default:
       return '[LOG]'
   }
+}
+
+/** UTF-8のバイト数で末尾を省略する。日本語を含むログでも上限を超えない。 */
+function fitUtf8(value: string, maxBytes: number): string {
+  const encoder = new TextEncoder()
+  if (encoder.encode(value).byteLength <= maxBytes) {
+    return value
+  }
+
+  const suffix = '…'
+  let end = value.length
+  while (end > 0 && encoder.encode(`${value.slice(0, end)}${suffix}`).byteLength > maxBytes) {
+    end -= 1
+  }
+
+  return `${value.slice(0, end)}${suffix}`
 }

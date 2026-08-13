@@ -53,3 +53,8 @@ env/
 # Others
 *.log
 *.orig
+
+# Even Hub packaging outputs (the source template is tracked)
+/frontend/app.json
+/release/
+/test-artifacts/

@@ -51,7 +51,7 @@ namespace EvenG2DebugBridge.Samples
 
             // [Even] タグを付けてログを出力する
             // このタグが付いたログのみ Even G2 に転送される
-            Debug.Log($"{EvenG2DebugClient.LOG_TAG} {message}");
+            Debug.Log($"{EvenG2DebugBridgeConstants.LogTag} {message}");
         }
 
         /// <summary>
@@ -60,7 +60,7 @@ namespace EvenG2DebugBridge.Samples
         /// <param name="message">送信するメッセージ</param>
         public static void SendToG2(string message)
         {
-            Debug.Log($"{EvenG2DebugClient.LOG_TAG} {message}");
+            Debug.Log($"{EvenG2DebugBridgeConstants.LogTag} {message}");
         }
 
         /// <summary>
@@ -68,7 +68,7 @@ namespace EvenG2DebugBridge.Samples
         /// </summary>
         public static void SendWarningToG2(string message)
         {
-            Debug.LogWarning($"{EvenG2DebugClient.LOG_TAG} {message}");
+            Debug.LogWarning($"{EvenG2DebugBridgeConstants.LogTag} {message}");
         }
 
         /// <summary>
@@ -76,7 +76,7 @@ namespace EvenG2DebugBridge.Samples
         /// </summary>
         public static void SendErrorToG2(string message)
         {
-            Debug.LogError($"{EvenG2DebugClient.LOG_TAG} {message}");
+            Debug.LogError($"{EvenG2DebugBridgeConstants.LogTag} {message}");
         }
     }
 }

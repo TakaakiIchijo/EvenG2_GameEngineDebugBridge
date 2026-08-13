@@ -1,34 +1,15 @@
+"""Even G2 Debug Bridge のエンジン非依存ローカルブリッジサーバー。
+
+ゲームエンジンは WebSocket でログを送信し、Even Hub Webアプリは同じ
+WebSocket からログを受信する。HTTPサーバーはビルド済みフロントエンドを
+同一LAN内のスマートフォンへ配信する。
+
+環境変数:
+    HTTP_PORT: HTTP配信ポート（既定: 8765）
+    WS_PORT:   WebSocketポート（既定: 8766）
 """
-Even G2 Debug Bridge - ローカルサーバー
-============================================
-ゲームエンジン（Unity / Unreal / Godot など）から WebSocket 経由でログを受信し、
-Even G2 Webアプリケーションにリアルタイムで配信するブリッジサーバー。
 
-本サーバーはゲームエンジン固有の情報に依存しない。
-Unity / Unreal / Godot のいずれからでも同一プロトコルで接続できる。
-
-起動方法:
-    pip install -r requirements.txt
-    python server.py
-
-環境変数 (省略可):
-    HTTP_PORT  : HTTPサーバーのポート番号 (デフォルト: 8765)
-    WS_PORT    : WebSocketサーバーのポート番号 (デフォルト: 8766)
-
-プロトコル:
-    接続後、最初のメッセージで種別を宣言する。
-    ゲームエンジン側: {"type": "engine"}
-    Webアプリ側:      {"type": "browser"}
-
-    ログメッセージ形式 (エンジン -> サーバー):
-    {
-        "type":      "log",
-        "level":     "Log" | "Warning" | "Error" | "Exception",
-        "message":   "<ログ本文>",
-        "timestamp": "HH:MM:SS",
-        "tag":       "[Even]"
-    }
-"""
+from __future__ import annotations
 
 import asyncio
 import json
@@ -37,211 +18,222 @@ import os
 import socket
 import threading
 from collections import deque
-from http.server import HTTPServer, SimpleHTTPRequestHandler
+from http import HTTPStatus
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
-import websockets
+from websockets.asyncio.server import serve
+from websockets.exceptions import ConnectionClosed
 
-# ---------------------------------------------------------------------------
-# 設定
-# ---------------------------------------------------------------------------
-HTTP_PORT = int(os.environ.get("HTTP_PORT", 8765))
-WS_PORT = int(os.environ.get("WS_PORT", 8766))
-LOG_BUFFER_SIZE = 50  # Webアプリに配信するログの最大保持件数
-FRONTEND_DIR = Path(__file__).parent.parent / "frontend" / "dist"
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+from protocol import (
+    LogEntry,
+    make_hello_payload,
+    make_history_payload,
+    make_status_payload,
+    parse_client_hello,
+    parse_log_entry,
 )
-logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# 状態管理
-# ---------------------------------------------------------------------------
-# 受信したログのリングバッファ（最新 LOG_BUFFER_SIZE 件を保持）
-log_buffer: deque[dict] = deque(maxlen=LOG_BUFFER_SIZE)
+HTTP_PORT = int(os.environ.get("HTTP_PORT", "8765"))
+WS_PORT = int(os.environ.get("WS_PORT", "8766"))
+LOG_BUFFER_SIZE = 20
+CLIENT_HELLO_TIMEOUT_SECONDS = 5
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
-# 接続中の Even G2 Webアプリ（ブラウザ側）クライアント
-browser_clients: set = set()
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("even_g2_debug_bridge")
 
-# 接続中のゲームエンジンクライアント
-engine_clients: set = set()
+log_buffer: deque[LogEntry] = deque(maxlen=LOG_BUFFER_SIZE)
+browser_clients: set[Any] = set()
+engine_clients: set[Any] = set()
 
 
 def get_local_ip() -> str:
-    """同一ネットワーク内からアクセス可能なローカルIPアドレスを取得する。"""
+    """同一LAN上の端末が到達できるローカルIPアドレスを取得する。"""
+
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
-    except Exception:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            return str(sock.getsockname()[0])
+    except OSError:
         return "127.0.0.1"
 
 
-# ---------------------------------------------------------------------------
-# WebSocket ハンドラ (websockets v14+ 対応)
-# ---------------------------------------------------------------------------
-async def handle_connection(websocket) -> None:
-    """
-    接続してきたクライアントを種別に応じて振り分ける。
+async def send_json(connection: Any, payload: dict[str, Any]) -> None:
+    """JSONペイロードを送信する。クライアントの切断は呼び出し側で処理する。"""
 
-    ゲームエンジン側は接続直後に {"type": "engine"} を送信する。
-    Even G2 Webアプリ側は接続直後に {"type": "browser"} を送信する。
-    """
-    client_type = "unknown"
-    try:
-        # 最初のメッセージで種別を判定
-        first_msg_raw = await asyncio.wait_for(websocket.recv(), timeout=5.0)
-        first_msg = json.loads(first_msg_raw)
-        client_type = first_msg.get("type", "unknown")
-
-        if client_type == "engine":
-            await handle_engine_client(websocket)
-        elif client_type == "browser":
-            await handle_browser_client(websocket)
-        else:
-            logger.warning("不明なクライアント種別: %s", client_type)
-    except asyncio.TimeoutError:
-        logger.warning("クライアント種別の判定がタイムアウトしました")
-    except websockets.exceptions.ConnectionClosed:
-        pass
-    except Exception as e:
-        logger.error("接続処理エラー (%s): %s", client_type, e)
+    await connection.send(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 
 
-async def handle_engine_client(websocket) -> None:
-    """
-    ゲームエンジン（Unity / Unreal / Godot）からのログを受信する。
-    受信したログはバッファに追加し、接続中のブラウザクライアントに配信する。
-    """
-    engine_clients.add(websocket)
-    remote = websocket.remote_address
+async def broadcast_log(entry: LogEntry) -> None:
+    """接続中のWebアプリへ正規化済みログを配信する。"""
+
+    if not browser_clients:
+        return
+
+    payload = json.dumps(entry.to_dict(), ensure_ascii=False, separators=(",", ":"))
+    recipients = tuple(browser_clients)
+    results = await asyncio.gather(
+        *(client.send(payload) for client in recipients),
+        return_exceptions=True,
+    )
+
+    for client, result in zip(recipients, results):
+        if isinstance(result, Exception):
+            browser_clients.discard(client)
+            logger.debug("切断済みWebアプリクライアントを除外しました: %s", result)
+
+
+async def handle_engine_client(connection: Any) -> None:
+    """ゲームエンジンから受信したログを検証・正規化してファンアウトする。"""
+
+    engine_clients.add(connection)
+    remote = connection.remote_address
     logger.info("ゲームエンジン接続: %s", remote)
 
-    # 接続確認レスポンスを返す
-    await websocket.send(json.dumps({
-        "type": "connected",
-        "message": "Even G2 Debug Bridge に接続しました",
-    }))
-
     try:
-        async for message_raw in websocket:
+        await send_json(connection, make_hello_payload("engine"))
+        async for raw_message in connection:
             try:
-                message = json.loads(message_raw)
-                log_entry = {
-                    "type":      "log",
-                    "level":     message.get("level", "Log"),
-                    "message":   message.get("message", ""),
-                    "timestamp": message.get("timestamp", ""),
-                    "tag":       message.get("tag", ""),
-                }
-                log_buffer.append(log_entry)
-                logger.info("[Engine Log] [%s] %s", log_entry["level"], log_entry["message"])
+                payload = json.loads(raw_message)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("不正なJSONを受信しました: %r", raw_message)
+                await send_json(connection, make_status_payload("rejected", "invalid_json"))
+                continue
 
-                # 接続中のブラウザクライアントに即時配信
-                if browser_clients:
-                    payload = json.dumps(log_entry)
-                    await asyncio.gather(
-                        *[client.send(payload) for client in browser_clients],
-                        return_exceptions=True,
-                    )
-            except json.JSONDecodeError:
-                logger.warning("不正なJSONを受信: %s", message_raw)
-    except websockets.exceptions.ConnectionClosed:
+            entry = parse_log_entry(payload)
+            if entry is None:
+                logger.warning("不正なログペイロードを拒否しました: %r", payload)
+                await send_json(connection, make_status_payload("rejected", "invalid_log_payload"))
+                continue
+
+            log_buffer.append(entry)
+            logger.info("[Engine Log] [%s] %s", entry.level, entry.message)
+            await broadcast_log(entry)
+    except ConnectionClosed:
         pass
     finally:
-        engine_clients.discard(websocket)
+        engine_clients.discard(connection)
         logger.info("ゲームエンジン切断: %s", remote)
 
 
-async def handle_browser_client(websocket) -> None:
-    """
-    Even G2 Webアプリ（ブラウザ）からの接続を管理する。
-    接続時にバッファ内の既存ログを一括送信する。
-    """
-    browser_clients.add(websocket)
-    remote = websocket.remote_address
-    logger.info("ブラウザクライアント接続: %s", remote)
+async def handle_browser_client(connection: Any) -> None:
+    """Even Hub Webアプリへ履歴と以後のリアルタイムログを提供する。"""
+
+    browser_clients.add(connection)
+    remote = connection.remote_address
+    logger.info("Webアプリ接続: %s", remote)
 
     try:
-        # 接続時にバッファ内の既存ログを送信
-        if log_buffer:
-            history_payload = json.dumps({
-                "type": "history",
-                "logs": list(log_buffer),
-            })
-            await websocket.send(history_payload)
-
-        # 接続を維持（ゲームエンジン側からのプッシュを待つ）
-        await websocket.wait_closed()
-    except websockets.exceptions.ConnectionClosed:
+        await send_json(connection, make_hello_payload("browser"))
+        await send_json(connection, make_history_payload(list(log_buffer)))
+        await connection.wait_closed()
+    except ConnectionClosed:
         pass
     finally:
-        browser_clients.discard(websocket)
-        logger.info("ブラウザクライアント切断: %s", remote)
+        browser_clients.discard(connection)
+        logger.info("Webアプリ切断: %s", remote)
 
 
-# ---------------------------------------------------------------------------
-# HTTP サーバー（フロントエンドのホスティング）
-# ---------------------------------------------------------------------------
+async def handle_connection(connection: Any) -> None:
+    """最初のメッセージに従い、エンジンまたはWebアプリとして接続を振り分ける。"""
+
+    client_type = "unknown"
+    try:
+        raw_hello = await asyncio.wait_for(connection.recv(), timeout=CLIENT_HELLO_TIMEOUT_SECONDS)
+        client_type = parse_client_hello(json.loads(raw_hello)) or "unknown"
+
+        if client_type == "engine":
+            await handle_engine_client(connection)
+        elif client_type == "browser":
+            await handle_browser_client(connection)
+        else:
+            logger.warning("不明なクライアント種別です: %s", client_type)
+            await send_json(connection, make_status_payload("rejected", "unknown_client_type"))
+            await connection.close(code=1008, reason="Unknown client type")
+    except asyncio.TimeoutError:
+        logger.warning("クライアント種別の判定がタイムアウトしました")
+        await connection.close(code=1008, reason="Client hello timeout")
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("接続時のクライアント宣言が不正です")
+        await connection.close(code=1008, reason="Invalid client hello")
+    except ConnectionClosed:
+        pass
+    except Exception:
+        logger.exception("接続処理中に予期しないエラーが発生しました: %s", client_type)
+
+
 class FrontendHandler(SimpleHTTPRequestHandler):
-    """Even G2 Webアプリの静的ファイルを配信するHTTPハンドラ。"""
+    """ビルド済みWebアプリとヘルスチェックを配信するHTTPハンドラ。"""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, directory=str(FRONTEND_DIR), **kwargs)
 
-    def log_message(self, format, *args):
+    def log_message(self, format: str, *args: Any) -> None:
         logger.debug("HTTP: " + format, *args)
 
-    def end_headers(self):
-        # CORS ヘッダーを付与（同一ネットワーク内のスマートフォンからのアクセスを許可）
+    def end_headers(self) -> None:
+        # LAN内ローカル開発用。外部公開サーバーとして利用しないこと。
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", "no-store")
         super().end_headers()
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.end_headers()
+
+    def do_GET(self) -> None:
+        if self.path == "/health":
+            body = json.dumps(
+                {
+                    "status": "ok",
+                    "browser_clients": len(browser_clients),
+                    "engine_clients": len(engine_clients),
+                    "buffered_logs": len(log_buffer),
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        super().do_GET()
 
 
 def run_http_server() -> None:
     """HTTPサーバーを別スレッドで起動する。"""
+
     if not FRONTEND_DIR.exists():
         logger.warning(
-            "フロントエンドのビルドディレクトリが見つかりません: %s\n"
-            "frontend/ ディレクトリで `npm run build` を実行してください。",
+            "フロントエンドのビルドディレクトリがありません: %s\n"
+            "frontend/ で `npm run build` を実行してから再起動してください。",
             FRONTEND_DIR,
         )
         return
 
-    server = HTTPServer(("0.0.0.0", HTTP_PORT), FrontendHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), FrontendHandler)
     logger.info("HTTPサーバー起動: http://0.0.0.0:%d", HTTP_PORT)
     server.serve_forever()
 
 
-# ---------------------------------------------------------------------------
-# エントリポイント
-# ---------------------------------------------------------------------------
 async def main() -> None:
+    """HTTP配信とWebSocketブリッジを開始する。"""
+
     local_ip = get_local_ip()
+    threading.Thread(target=run_http_server, daemon=True).start()
 
-    # HTTPサーバーを別スレッドで起動
-    http_thread = threading.Thread(target=run_http_server, daemon=True)
-    http_thread.start()
-
-    # WebSocketサーバーを起動 (websockets v14+ の新API)
-    async with websockets.serve(handle_connection, "0.0.0.0", WS_PORT):
+    async with serve(handle_connection, "0.0.0.0", WS_PORT, origins=None):
         logger.info("=" * 60)
-        logger.info("Even G2 Debug Bridge が起動しました")
+        logger.info("Even G2 Debug Bridge を起動しました")
+        logger.info("WebSocket: ws://%s:%d", local_ip, WS_PORT)
+        logger.info("Webアプリ:  http://%s:%d", local_ip, HTTP_PORT)
+        logger.info("ヘルス確認:  http://%s:%d/health", local_ip, HTTP_PORT)
         logger.info("=" * 60)
-        logger.info("  WebSocket (ゲームエンジン/ブラウザ): ws://%s:%d", local_ip, WS_PORT)
-        logger.info("  Even G2 Webアプリ (HTTP):           http://%s:%d", local_ip, HTTP_PORT)
-        logger.info("")
-        logger.info("  ゲームエンジンプラグインの接続先URL:")
-        logger.info("    ws://%s:%d", local_ip, WS_PORT)
-        logger.info("")
-        logger.info("  スマートフォンのEven HubアプリでアクセスするURL:")
-        logger.info("    http://%s:%d", local_ip, HTTP_PORT)
-        logger.info("=" * 60)
-        await asyncio.Future()  # サーバーを永続的に実行
+        await asyncio.Future()
 
 
 if __name__ == "__main__":

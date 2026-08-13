@@ -38,6 +38,7 @@ namespace EvenG2DebugBridge.Editor
         private int    _httpPort;
         private string _localIp;
         private string _lastError;
+        private int    _coalescedLogCount;
 
         // QRコード表示用テクスチャ
         private Texture2D _qrTexture;
@@ -209,6 +210,10 @@ namespace EvenG2DebugBridge.Editor
                 }
             }
             EditorGUILayout.EndScrollView();
+            EditorGUILayout.LabelField(
+                $"間引き済みログ: {_coalescedLogCount} 件（送信間隔: {EvenG2DebugClient.SendIntervalSeconds * 1000:0}ms）",
+                EditorStyles.centeredGreyMiniLabel
+            );
         }
 
         // ----------------------------------------------------------------
@@ -219,16 +224,16 @@ namespace EvenG2DebugBridge.Editor
             _lastError = null;
             _client    = new EvenG2DebugClient(_serverUrl);
 
-            _client.OnConnectionStateChanged += connected =>
+            _client.ConnectionStateChanged += (connected, detail) =>
             {
                 _isConnected = connected;
-                if (!connected)
-                    _lastError = $"サーバーへの接続が切断されました ({_serverUrl})";
+                _lastError = connected ? null : $"{detail} ({_serverUrl})";
                 Repaint();
             };
 
-            _client.OnLogSent += log =>
+            _client.LogSent += log =>
             {
+                _coalescedLogCount = _client.CoalescedLogCount;
                 _logPreview.Enqueue(log);
                 while (_logPreview.Count > LOG_PREVIEW_MAX)
                     _logPreview.Dequeue();

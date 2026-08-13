@@ -1,0 +1,17 @@
+{
+  "package_id": "com.takaakiichijo.eveng2debugbridge",
+  "edition": "202601",
+  "name": "G2 Debug Bridge",
+  "version": "1.1.0",
+  "min_app_version": "2.2.6",
+  "min_sdk_version": "0.0.13",
+  "entrypoint": "index.html",
+  "permissions": [
+    {
+      "name": "network",
+      "desc": "Receives debug logs from a developer-controlled local bridge server on the same network.",
+      "whitelist": ["__LOCAL_BRIDGE_ORIGIN__"]
+    }
+  ],
+  "supported_languages": ["ja", "en"]
+}

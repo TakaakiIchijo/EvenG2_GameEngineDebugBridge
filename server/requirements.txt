@@ -1,1 +1,3 @@
-websockets>=12.0
+# Engine-agnostic WebSocket bridge.
+# server.py uses the asyncio API introduced in websockets 14 and verified with v16.
+websockets>=16.0,<17.0
