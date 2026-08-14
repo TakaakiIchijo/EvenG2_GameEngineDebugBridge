@@ -28,11 +28,14 @@ from websockets.exceptions import ConnectionClosed
 
 from protocol import (
     LogEntry,
+    MinimapState,
     make_hello_payload,
     make_history_payload,
+    make_minimap_payload,
     make_status_payload,
     parse_client_hello,
     parse_log_entry,
+    parse_minimap_state,
 )
 
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8765"))
@@ -45,6 +48,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("even_g2_debug_bridge")
 
 log_buffer: deque[LogEntry] = deque(maxlen=LOG_BUFFER_SIZE)
+latest_minimap: MinimapState | None = None
 browser_clients: set[Any] = set()
 engine_clients: set[Any] = set()
 
@@ -85,6 +89,24 @@ async def broadcast_log(entry: LogEntry) -> None:
             logger.debug("切断済みWebアプリクライアントを除外しました: %s", result)
 
 
+async def broadcast_minimap(state: MinimapState) -> None:
+    """接続中のWebアプリへ検証済みの最新ミニマップを配信する。"""
+
+    if not browser_clients:
+        return
+
+    payload = json.dumps(make_minimap_payload(state), ensure_ascii=False, separators=(",", ":"))
+    recipients = tuple(browser_clients)
+    results = await asyncio.gather(
+        *(client.send(payload) for client in recipients),
+        return_exceptions=True,
+    )
+    for client, result in zip(recipients, results):
+        if isinstance(result, Exception):
+            browser_clients.discard(client)
+            logger.debug("切断済みWebアプリクライアントを除外しました: %s", result)
+
+
 async def handle_engine_client(connection: Any) -> None:
     """ゲームエンジンから受信したログを検証・正規化してファンアウトする。"""
 
@@ -103,14 +125,22 @@ async def handle_engine_client(connection: Any) -> None:
                 continue
 
             entry = parse_log_entry(payload)
-            if entry is None:
-                logger.warning("不正なログペイロードを拒否しました: %r", payload)
-                await send_json(connection, make_status_payload("rejected", "invalid_log_payload"))
+            if entry is not None:
+                log_buffer.append(entry)
+                logger.info("[Engine Log] [%s] %s", entry.level, entry.message)
+                await broadcast_log(entry)
                 continue
 
-            log_buffer.append(entry)
-            logger.info("[Engine Log] [%s] %s", entry.level, entry.message)
-            await broadcast_log(entry)
+            minimap = parse_minimap_state(payload)
+            if minimap is not None:
+                global latest_minimap
+                latest_minimap = minimap
+                logger.info("[Minimap] %dx%d revision=%d state=%s", minimap.width, minimap.height, minimap.revision, minimap.state)
+                await broadcast_minimap(minimap)
+                continue
+
+            logger.warning("不正なエンジンペイロードを拒否しました: %r", payload)
+            await send_json(connection, make_status_payload("rejected", "invalid_engine_payload"))
     except ConnectionClosed:
         pass
     finally:
@@ -128,6 +158,8 @@ async def handle_browser_client(connection: Any) -> None:
     try:
         await send_json(connection, make_hello_payload("browser"))
         await send_json(connection, make_history_payload(list(log_buffer)))
+        if latest_minimap is not None:
+            await send_json(connection, make_minimap_payload(latest_minimap))
         await connection.wait_closed()
     except ConnectionClosed:
         pass
@@ -192,6 +224,7 @@ class FrontendHandler(SimpleHTTPRequestHandler):
                     "browser_clients": len(browser_clients),
                     "engine_clients": len(engine_clients),
                     "buffered_logs": len(log_buffer),
+                    "has_minimap": latest_minimap is not None,
                 },
                 ensure_ascii=False,
             ).encode("utf-8")

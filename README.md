@@ -18,6 +18,7 @@
 | Even Hub Webアプリ | `frontend/` | Even App WebView上でログを受信し、G2のテキストコンテナに表示します。 |
 | Unity Editorプラグイン | `unity-plugin/EvenG2DebugBridge/` | Unity Editorログを監視し、送信対象を`[Even]`タグに限定します。 |
 | Godot 4サンプル | `godot-sample/` | Godotの`WebSocketPeer`から`[Even]`タグ付きLog、Warning、Errorを送信する最小プロジェクトです。 |
+| Godotダンジョンゲーム | `godot-dungeon/` | ランダムグリッド迷路、銃撃戦、10種類の敵、探索ミニマップを含む3D探索ゲームです。 |
 | モックエンジン | `server/mock_engine.py` | UnityやGodotを起動せず、バックエンドとWebアプリの統合テストを実行します。 |
 
 ## 主な仕様
@@ -29,11 +30,13 @@
 | Godot側の送信制御 | `WebSocketPeer.poll()`を毎フレーム実行し、サーバーとのハンドシェイク完了後にテキストWebSocketフレームで送信します。サンプルは250ms間隔で最新ログを送るクライアントを含みます。[5] |
 | Webアプリ側の表示制御 | Unity以外のクライアントも考慮し、Webアプリ側でも最新ログを保持して最大**毎秒4回**に更新を制限します。 |
 | G2データ量 | UTF-8で最大**880バイト**に切り詰めます。日本語を含む表示データを保守的に900バイト未満へ収めるためです。実機での最終確認は必須です。 |
-| SDKページ操作 | 初回だけ`createStartUpPageContainer()`でテキストコンテナを作成し、以後は`textContainerUpgrade()`で本文だけを更新します。 |
+| SDKページ操作 | 初回はコンテンツ種別に応じて`createStartUpPageContainer()`を使います。ログは`textContainerUpgrade()`、ダンジョンのミニマップは`updateImageRawData()`で更新します。 |
+| ミニマップ転送 | Godotは壁・探索済みセル・プレイヤー・ゴールを構造化JSONで送ります。Webアプリが104×104のグレースケールPNGへ変換し、画像コンテナ1個と状態テキスト1個へ直列送信します。 |
+| ミニマップ更新制御 | 新規セル到達・回転・再生成・戦闘後だけ状態を更新します。GodotクライアントとWebアプリの双方で250ms間隔に集約します。 |
 | 終了操作 | G2のダブルクリックで終了ダイアログを要求し、イベント購読とタイマーを解放します。 |
 | パッケージ化 | `app.manifest.template.json`から接続先LANオリジンを含む`app.json`を生成し、`.ehpk`へパッケージ化します。SDK 0.0.13のマニフェスト要件に従います。[1] |
 
-G2ページはテキストコンテナを1個だけ使用し、イベント捕捉コンテナも1個だけにしています。これはSDKのページコンテナ制約に沿うためです。[1]
+ログページはテキストコンテナを1個だけ使用します。ダンジョンのミニマップページは画像コンテナ1個とイベント捕捉用テキストコンテナ1個を使用し、両コンテナに一意の`zOrderIndex`を指定します。これはSDKのページコンテナ制約に沿うためです。[1]
 
 ## 動作要件
 
@@ -145,7 +148,36 @@ godot --headless --path godot-sample \
   --bridge-url=ws://127.0.0.1:8766
 ```
 
-### 7. 実機のLocal Testing
+### 7. Godot Grid Dungeon Explorerの実行
+
+`godot-dungeon/`は、13×13の完全迷路をシードから生成する一人称3D探索ゲームです。プレイヤーは銃を使い、移動・攻撃方法の異なる雑魚7種、中ボス2種、出口を守るボス1種と対戦します。敵は開始地点から距離を取って出現し、出口へ到達するにはボスを撃破する必要があります。
+
+```bash
+# ローカルブリッジを起動済みにしてから、Godotエディタで
+# godot-dungeon/project.godot をImportしてMain.tscnを実行します。
+# コマンド実行例:
+godot --path godot-dungeon -- --bridge-url=ws://127.0.0.1:8766
+```
+
+| 操作 | 内容 |
+| :--- | :--- |
+| `W` / `S`、上下キー | 前進・後退（グリッド単位） |
+| `A` / `D`、左右キー | 90度回転 |
+| `Space` | 銃を発射します。射線上で最初に当たった敵へダメージを与えます。 |
+| `F` | リロードします。 |
+| `R` | 新しいシードのダンジョンを生成します。 |
+
+ミニマップは壁、未探索セル、探索済みセル、ゴール、プレイヤー位置を表示します。Godotの初期化、迷路の連結性、ゴール到達性、敵10種の編成、戦闘HUD、ターン、移動は次のヘッドレステストで確認できます。
+
+```bash
+godot --headless --path godot-dungeon --script res://tests/dungeon_generation_test.gd
+godot --headless --path godot-dungeon --script res://tests/enemy_encounter_test.gd
+godot --headless --path godot-dungeon --script res://tests/gameplay_flow_test.gd
+```
+
+Simulatorでは、GodotからのミニマップJSON受信、画像更新APIの`success`、状態テキスト更新APIの成功を確認しました。SimulatorのG2スクリーンショットには画像コンテナが描画されない挙動があったため、グラス上でのミニマップの最終的な可視性と連続画像更新は、実機でLocal Testingを行って確認してください。[4]
+
+### 8. 実機のLocal Testing
 
 実機確認では、PCのLAN IPアドレスを指定したURLをQR化します。例えばローカルサーバーが`192.168.1.20`の場合は次の通りです。
 
@@ -155,7 +187,7 @@ evenhub qr --url "http://192.168.1.20:8765"
 
 開発PCとスマートフォンを同一LANへ接続してください。パッケージ化して配布する場合は、次節のマニフェスト生成で接続先オリジンを`network.whitelist`に含める必要があります。`whitelist`とサーバー側CORSは別の制約です。[3]
 
-### 8. Even Hubパッケージの生成
+### 9. Even Hubパッケージの生成
 
 `app.json`はLAN接続先ごとに生成するため、Git管理しません。`<LAN_IP>`を実際のPCアドレスに置き換えます。
 
@@ -229,6 +261,7 @@ The frontend targets **Even Hub SDK 0.0.13**, **Even Hub Simulator 0.8.0**, and 
 | Even Hub web app | `frontend/` | Receives bridge messages in the Even App WebView and writes them to the G2 text container. |
 | Unity Editor plugin | `unity-plugin/EvenG2DebugBridge/` | Watches Unity Editor logs and filters messages by the `[Even]` tag. |
 | Godot 4 sample | `godot-sample/` | Minimal project that sends `[Even]`-tagged Log, Warning, and Error entries with Godot `WebSocketPeer`. |
+| Godot dungeon game | `godot-dungeon/` | 3D exploration game with a random grid maze, gun combat, ten enemy types, and an exploration minimap. |
 | Mock engine | `server/mock_engine.py` | Runs server and web-app integration tests without launching Unity or Godot. |
 
 ## Core behavior
@@ -239,7 +272,9 @@ The frontend targets **Even Hub SDK 0.0.13**, **Even Hub Simulator 0.8.0**, and 
 | Godot sending | The client calls `WebSocketPeer.poll()` every frame, waits for the bridge handshake, and then sends text WebSocket frames. The sample client coalesces logs to a 250ms interval. [5] |
 | Frontend rendering | The web app also coalesces incoming entries and limits G2 updates to **four per second**, protecting future Unreal or Godot clients that do not implement Unity-side throttling. |
 | G2 payload | The display text is truncated by UTF-8 byte length to **880 bytes**, a conservative value below the practical 900-byte target for Japanese text. Validate the final limit on hardware. |
-| SDK lifecycle | The app creates one startup text container, then updates only its content with `textContainerUpgrade()`. |
+| SDK lifecycle | The first page is created for the first received content type. Logs use `textContainerUpgrade()`; dungeon minimaps use `updateImageRawData()`. |
+| Minimap transport | Godot sends walls, explored cells, player state, and goal state as structured JSON. The web app converts it to a 104×104 greyscale PNG and serially updates one image container plus one status text container. |
+| Minimap pacing | State changes are emitted only after a move, turn, regeneration, or combat action. Both the Godot client and web app coalesce updates to a 250ms interval. |
 | Exit | A G2 double click requests the system close dialog and releases event subscriptions and timers. |
 | Packaging | A per-LAN `app.json` is generated from `app.manifest.template.json`, then packaged as `.ehpk` with the SDK 0.0.13 manifest requirements. [1] |
 
@@ -313,6 +348,34 @@ godot --headless --path godot-sample \
   --bridge-url=ws://127.0.0.1:8766
 ```
 
+### Run the Godot Grid Dungeon Explorer
+
+`godot-dungeon/` is a first-person 3D exploration game that generates a seeded 13×13 perfect maze. The player uses a gun against seven minion types, two midbosses, and one boss guarding the exit. Enemies spawn away from the start position; the exit remains blocked until the boss is defeated.
+
+```bash
+# Start the local bridge first, then import godot-dungeon/project.godot in Godot.
+# Command-line example:
+godot --path godot-dungeon -- --bridge-url=ws://127.0.0.1:8766
+```
+
+| Control | Action |
+| :--- | :--- |
+| `W` / `S`, Up / Down | Move forward or backward by one grid cell. |
+| `A` / `D`, Left / Right | Turn 90 degrees. |
+| `Space` | Fire the gun; the first enemy on the line of fire receives damage. |
+| `F` | Reload. |
+| `R` | Generate a dungeon with a new seed. |
+
+The minimap includes walls, unexplored cells, explored cells, the goal, and the player position. Run these repeatable headless tests to verify scene initialization, maze connectivity and reachability, the ten-enemy roster, combat HUD setup, turning, and movement.
+
+```bash
+godot --headless --path godot-dungeon --script res://tests/dungeon_generation_test.gd
+godot --headless --path godot-dungeon --script res://tests/enemy_encounter_test.gd
+godot --headless --path godot-dungeon --script res://tests/gameplay_flow_test.gd
+```
+
+Simulator validation confirmed receipt of the Godot minimap JSON plus successful image-update and status-text-update API responses. Its G2 screenshot did not visibly render the image container, so final minimap visibility and continuous image updates must be confirmed in Local Testing on physical glasses. [4]
+
 ### Local Testing on hardware
 
 ```bash
@@ -340,7 +403,7 @@ python mock_engine.py --mode rapid --count 20 --interval 0.05
 python mock_engine.py --mode long
 ```
 
-Simulator testing in this repository covers sequential logs, 20 high-frequency entries, long UTF-8 messages, and double-click shutdown. In addition, a real Godot Engine 4.7.1 process sent four `[Even]` entries; server receipt, WebView rendering, and a non-transparent G2 RGBA draw region were confirmed. Simulator does not model BLE bandwidth, device fonts, or native connection behavior. Use Local, Private, and Beta Testing on physical hardware before distribution. [4]
+Simulator testing in this repository covers sequential logs, 20 high-frequency entries, long UTF-8 messages, and double-click shutdown. A real Godot Engine 4.7.1 process also sent a dungeon minimap state to the local bridge; the WebView receipt plus successful image and status-text API responses were confirmed. Simulator does not model BLE bandwidth, device fonts, native image transfer, or native connection behavior. Use Local, Private, and Beta Testing on physical hardware before distribution. [4]
 
 ## Security and license
 

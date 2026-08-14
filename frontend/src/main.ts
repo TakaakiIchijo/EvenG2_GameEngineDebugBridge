@@ -1,4 +1,4 @@
-import { disposeG2, initG2, queueLogForG2, type G2ConnectionState } from './g2-display'
+import { disposeG2, initG2, queueLogForG2, queueMinimapForG2, type G2ConnectionState, type MinimapState } from './g2-display'
 
 interface LogEntry {
   type: 'log'
@@ -19,6 +19,8 @@ interface StatusPayload {
   status: string
   detail?: string
 }
+
+type MinimapPayload = MinimapState & { protocol_version?: number }
 
 const params = new URLSearchParams(window.location.search)
 const wsPort = params.get('wsPort') ?? '8766'
@@ -116,6 +118,11 @@ function handleServerMessage(payload: unknown): void {
     return
   }
 
+  if (typedPayload.type === 'minimap') {
+    handleMinimap(typedPayload as MinimapPayload)
+    return
+  }
+
   if (typedPayload.type === 'history') {
     const history = typedPayload as HistoryPayload
     receivedCount = history.logs.length
@@ -131,6 +138,14 @@ function handleServerMessage(payload: unknown): void {
   if (typedPayload.type === 'status') {
     const status = typedPayload as StatusPayload
     console.warn(`[Bridge] サーバー通知: ${status.status}${status.detail ? ` (${status.detail})` : ''}`)
+  }
+}
+
+function handleMinimap(minimap: MinimapPayload): void {
+  queueMinimapForG2(minimap)
+  if (latestLog) {
+    latestLog.className = 'message level-log'
+    latestLog.textContent = `Dungeon map r${minimap.revision}: ${minimap.width}×${minimap.height}, player ${minimap.player.x},${minimap.player.y}`
   }
 }
 
