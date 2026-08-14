@@ -6,7 +6,7 @@
 
 ## 概要
 
-**EvenG2 Game Engine Debug Bridge** は、ゲームプレイ中に開発者だけが確認したいログをEven G2スマートグラスへ送る、ローカルネットワーク向けのデバッグ支援ツールです。Unity Editorプラグインは`[Even]`タグを含むコンソールログだけを送信します。PythonブリッジサーバーとEven Hub Webアプリはゲームエンジン固有の情報を持たないため、同じ通信プロトコルを実装すればUnreal EngineやGodotへも接続できます。
+**EvenG2 Game Engine Debug Bridge** は、ゲームプレイ中に開発者だけが確認したいログをEven G2スマートグラスへ送る、ローカルネットワーク向けのデバッグ支援ツールです。Unity EditorプラグインとGodot 4サンプルは、`[Even]`タグを含むログだけを送信します。PythonブリッジサーバーとEven Hub Webアプリはゲームエンジン固有の情報を持たないため、同じ通信プロトコルを実装すればUnreal Engineなどのクライアントも接続できます。
 
 フロントエンドはEven Hub SDK **0.0.13**、Even Hub Simulator **0.8.0**、Even Hub CLI **0.1.13**を基準にしています。SDK 0.0.13を使う配布パッケージでは、Even Realities App **2.2.6以降**とNode.js **20以降または22以降**が必要です。[1]
 
@@ -17,7 +17,8 @@
 | ローカルブリッジサーバー | `server/` | WebSocketでエンジン側ログを受信し、Webアプリへ配信します。ビルド済みWebアプリもHTTP配信します。 |
 | Even Hub Webアプリ | `frontend/` | Even App WebView上でログを受信し、G2のテキストコンテナに表示します。 |
 | Unity Editorプラグイン | `unity-plugin/EvenG2DebugBridge/` | Unity Editorログを監視し、送信対象を`[Even]`タグに限定します。 |
-| モックエンジン | `server/mock_engine.py` | Unityを起動せず、バックエンドとWebアプリの統合テストを実行します。 |
+| Godot 4サンプル | `godot-sample/` | Godotの`WebSocketPeer`から`[Even]`タグ付きLog、Warning、Errorを送信する最小プロジェクトです。 |
+| モックエンジン | `server/mock_engine.py` | UnityやGodotを起動せず、バックエンドとWebアプリの統合テストを実行します。 |
 
 ## 主な仕様
 
@@ -25,7 +26,8 @@
 | :--- | :--- |
 | 送信対象 | Unityの`Log`、`Warning`、`Error`、`Exception`のうち、本文に`[Even]`を含むものだけを送信します。 |
 | Unity側の送信制御 | `Application.logMessageReceivedThreaded`では最新ログをバッファするだけにし、メインスレッドから**250ms間隔**で送信します。過剰なログは最新1件へ集約し、Unity Consoleに一度だけ警告します。 |
-| Webアプリ側の表示制御 | Unity以外の将来のクライアントも考慮し、Webアプリ側でも最新ログを保持して最大**毎秒4回**に更新を制限します。 |
+| Godot側の送信制御 | `WebSocketPeer.poll()`を毎フレーム実行し、サーバーとのハンドシェイク完了後にテキストWebSocketフレームで送信します。サンプルは250ms間隔で最新ログを送るクライアントを含みます。[5] |
+| Webアプリ側の表示制御 | Unity以外のクライアントも考慮し、Webアプリ側でも最新ログを保持して最大**毎秒4回**に更新を制限します。 |
 | G2データ量 | UTF-8で最大**880バイト**に切り詰めます。日本語を含む表示データを保守的に900バイト未満へ収めるためです。実機での最終確認は必須です。 |
 | SDKページ操作 | 初回だけ`createStartUpPageContainer()`でテキストコンテナを作成し、以後は`textContainerUpgrade()`で本文だけを更新します。 |
 | 終了操作 | G2のダブルクリックで終了ダイアログを要求し、イベント購読とタイマーを解放します。 |
@@ -40,6 +42,7 @@ G2ページはテキストコンテナを1個だけ使用し、イベント捕�
 | Python | Python 3.9以降。`websockets` 16系を使用します。 |
 | Node.js | `^20.0.0` または `>=22.0.0`。[2] |
 | Unity | Unity 2021.3 LTS以降。 |
+| Godot | Godot Engine 4.7.1で検証済み。Godot 4系の`WebSocketPeer`を使用します。[5] |
 | Even Hub SDK | `@evenrealities/even_hub_sdk` 0.0.13。 |
 | Even Hub Simulator | 0.8.0（開発・検証用）。 |
 | Even Hub CLI | 0.1.13（QR Local Testing・パッケージ化用）。 |
@@ -124,7 +127,25 @@ Debug.LogError("[Even] EnemyController reference is missing");
 
 > **QRコードについて:** Unity Editorウィンドウで読み取り可能なQRコードを生成するには、Unityプロジェクト側へZXing.Net（`ZXing.Unity`）を導入してください。未導入時はURLを示すプレースホルダーになるため、スキャンには使えません。代わりに、次節の`evenhub qr`を使用してください。
 
-### 6. 実機のLocal Testing
+### 6. Godot 4サンプルの実行
+
+Godot 4.7.1の標準Linux版で、実際のブリッジ接続・ログ送信を検証しています。Godotの公式配布は自己完結型のため、展開後に実行できます。[6]
+
+```bash
+# Godotエディタから godot-sample/project.godot をImportして実行するか、
+# Linuxでは次のようにヘッドレスで実行します。
+godot --headless --path godot-sample -- --bridge-url=ws://127.0.0.1:8766
+```
+
+起動後、サンプルは`[Even]`タグ付きのLog、Warning、Error、Logを4件送信します。画面上の **Send next [Even] sample log** ボタンでは追加のサンプルログを送信できます。ヘッドレスの回帰確認には、ローカルブリッジを起動した状態で以下を実行します。
+
+```bash
+godot --headless --path godot-sample \
+  --script res://tests/bridge_smoke_test.gd -- \
+  --bridge-url=ws://127.0.0.1:8766
+```
+
+### 7. 実機のLocal Testing
 
 実機確認では、PCのLAN IPアドレスを指定したURLをQR化します。例えばローカルサーバーが`192.168.1.20`の場合は次の通りです。
 
@@ -134,7 +155,7 @@ evenhub qr --url "http://192.168.1.20:8765"
 
 開発PCとスマートフォンを同一LANへ接続してください。パッケージ化して配布する場合は、次節のマニフェスト生成で接続先オリジンを`network.whitelist`に含める必要があります。`whitelist`とサーバー側CORSは別の制約です。[3]
 
-### 7. Even Hubパッケージの生成
+### 8. Even Hubパッケージの生成
 
 `app.json`はLAN接続先ごとに生成するため、Git管理しません。`<LAN_IP>`を実際のPCアドレスに置き換えます。
 
@@ -164,7 +185,7 @@ python mock_engine.py --mode long
 | `rapid` | 高頻度ログを最新値へ集約し、G2更新を250ms間隔に保つこと。 |
 | `long` | 日本語を含む長文をUTF-8の880バイト以内に切り詰めること。 |
 
-このリポジトリではSimulator v0.8.0、モックエンジン、Pythonサーバーを用いて、通常ログ、高頻度20件、長文、ダブルクリック終了を検証しています。SimulatorはBLE帯域・実機フォント・端末固有の接続状態を再現しないため、最終的な表示量と接続安定性は実機のLocal Testing、Private Testing、Beta Testingで確認してください。[4]
+このリポジトリではSimulator v0.8.0、モックエンジン、Pythonサーバーを用いて、通常ログ、高頻度20件、長文、ダブルクリック終了を検証しています。加えてGodot Engine 4.7.1の実行プロセスから4件の`[Even]`ログを送信し、サーバー受信、WebView表示、G2 RGBAキャプチャの非透明描画領域を確認しました。SimulatorはBLE帯域・実機フォント・端末固有の接続状態を再現しないため、最終的な表示量と接続安定性は実機のLocal Testing、Private Testing、Beta Testingで確認してください。[4]
 
 ## セキュリティと運用上の注意
 
@@ -184,6 +205,10 @@ MIT Licenseです。詳細は[LICENSE](LICENSE)を参照してください。
 
 [4] [Even Hub Simulator — 自動化と検証](https://www.npmjs.com/package/@evenrealities/evenhub-simulator)
 
+[5] [Godot Engine 4.7 — WebSocketPeer](https://docs.godotengine.org/en/stable/classes/class_websocketpeer.html)
+
+[6] [Godot Engine 4.7.1 — Linux標準版ダウンロード](https://godotengine.org/download/linux/)
+
 ---
 
 <a id="english"></a>
@@ -192,7 +217,7 @@ MIT Licenseです。詳細は[LICENSE](LICENSE)を参照してください。
 
 ## Overview
 
-**EvenG2 Game Engine Debug Bridge** is a local-network debugging tool that sends developer-only logs to Even G2 smart glasses during game playtests. The Unity Editor plugin forwards only console messages that contain the `[Even]` tag. The Python bridge server and Even Hub web app are independent of any game engine, so Unreal Engine or Godot clients can use the same transport protocol in the future.
+**EvenG2 Game Engine Debug Bridge** is a local-network debugging tool that sends developer-only logs to Even G2 smart glasses during game playtests. The Unity Editor plugin and Godot 4 sample forward only messages that contain the `[Even]` tag. The Python bridge server and Even Hub web app are engine-agnostic, so clients such as Unreal Engine can use the same transport protocol.
 
 The frontend targets **Even Hub SDK 0.0.13**, **Even Hub Simulator 0.8.0**, and **Even Hub CLI 0.1.13**. An SDK 0.0.13 package requires Even Realities App **2.2.6 or later** and Node.js **20 or later, or 22 or later**. [1]
 
@@ -203,13 +228,15 @@ The frontend targets **Even Hub SDK 0.0.13**, **Even Hub Simulator 0.8.0**, and 
 | Local bridge server | `server/` | Receives logs through WebSocket, broadcasts them to the web app, and serves the built frontend over HTTP. |
 | Even Hub web app | `frontend/` | Receives bridge messages in the Even App WebView and writes them to the G2 text container. |
 | Unity Editor plugin | `unity-plugin/EvenG2DebugBridge/` | Watches Unity Editor logs and filters messages by the `[Even]` tag. |
-| Mock engine | `server/mock_engine.py` | Runs server and web-app integration tests without launching Unity. |
+| Godot 4 sample | `godot-sample/` | Minimal project that sends `[Even]`-tagged Log, Warning, and Error entries with Godot `WebSocketPeer`. |
+| Mock engine | `server/mock_engine.py` | Runs server and web-app integration tests without launching Unity or Godot. |
 
 ## Core behavior
 
 | Area | Behavior |
 | :--- | :--- |
 | Unity sending | The threaded Unity log callback only buffers the newest message. Serialization and sends run on the Editor main thread every **250ms**. Intermediate logs are coalesced and a single warning is printed to the Unity Console. |
+| Godot sending | The client calls `WebSocketPeer.poll()` every frame, waits for the bridge handshake, and then sends text WebSocket frames. The sample client coalesces logs to a 250ms interval. [5] |
 | Frontend rendering | The web app also coalesces incoming entries and limits G2 updates to **four per second**, protecting future Unreal or Godot clients that do not implement Unity-side throttling. |
 | G2 payload | The display text is truncated by UTF-8 byte length to **880 bytes**, a conservative value below the practical 900-byte target for Japanese text. Validate the final limit on hardware. |
 | SDK lifecycle | The app creates one startup text container, then updates only its content with `textContainerUpgrade()`. |
@@ -223,6 +250,7 @@ The frontend targets **Even Hub SDK 0.0.13**, **Even Hub Simulator 0.8.0**, and 
 | Python | Python 3.9+ with `websockets` 16.x. |
 | Node.js | `^20.0.0` or `>=22.0.0`. [2] |
 | Unity | Unity 2021.3 LTS or later. |
+| Godot | Validated with Godot Engine 4.7.1 using the Godot 4 `WebSocketPeer` API. [5] |
 | Even Hub SDK | `@evenrealities/even_hub_sdk` 0.0.13. |
 | Simulator / CLI | Even Hub Simulator 0.8.0 and Even Hub CLI 0.1.13. |
 | Even Realities App | 2.2.6 or later for the SDK 0.0.13 package. [2] |
@@ -269,6 +297,22 @@ The included Basic Sample scene is located at `Samples/Even G2 Debug Bridge/Basi
 
 > **QR code note:** The Unity Editor window generates a scannable QR code only when ZXing.Net (`ZXing.Unity`) is installed in the Unity project. Otherwise it shows a non-scannable placeholder. Use `evenhub qr` as the reliable alternative.
 
+### Run the Godot 4 sample
+
+The sample has been exercised with the Godot Engine 4.7.1 standard Linux build. Godot's official Linux distribution is self-contained: extract it and run the binary. [6]
+
+```bash
+godot --headless --path godot-sample -- --bridge-url=ws://127.0.0.1:8766
+```
+
+At startup, the sample sends four `[Even]`-tagged Log, Warning, Error, and Log entries. The **Send next [Even] sample log** button sends an additional entry. Run the repeatable headless smoke test against a running local bridge as follows:
+
+```bash
+godot --headless --path godot-sample \
+  --script res://tests/bridge_smoke_test.gd -- \
+  --bridge-url=ws://127.0.0.1:8766
+```
+
 ### Local Testing on hardware
 
 ```bash
@@ -296,7 +340,7 @@ python mock_engine.py --mode rapid --count 20 --interval 0.05
 python mock_engine.py --mode long
 ```
 
-Simulator testing in this repository covers sequential logs, 20 high-frequency entries, long UTF-8 messages, and double-click shutdown. Simulator does not model BLE bandwidth, device fonts, or native connection behavior. Use Local, Private, and Beta Testing on physical hardware before distribution. [4]
+Simulator testing in this repository covers sequential logs, 20 high-frequency entries, long UTF-8 messages, and double-click shutdown. In addition, a real Godot Engine 4.7.1 process sent four `[Even]` entries; server receipt, WebView rendering, and a non-transparent G2 RGBA draw region were confirmed. Simulator does not model BLE bandwidth, device fonts, or native connection behavior. Use Local, Private, and Beta Testing on physical hardware before distribution. [4]
 
 ## Security and license
 
@@ -311,3 +355,7 @@ This tool is intended for trusted LANs such as exhibitions and internal playtest
 [3] [Even Hub documentation — networking, CORS, and Local Testing](https://hub.evenrealities.com/docs)
 
 [4] [Even Hub Simulator — automation and testing](https://www.npmjs.com/package/@evenrealities/evenhub-simulator)
+
+[5] [Godot Engine 4.7 — WebSocketPeer](https://docs.godotengine.org/en/stable/classes/class_websocketpeer.html)
+
+[6] [Godot Engine 4.7.1 — standard Linux download](https://godotengine.org/download/linux/)

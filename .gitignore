@@ -58,3 +58,6 @@ env/
 /frontend/app.json
 /release/
 /test-artifacts/
+
+# Godot import cache and editor-local files
+**/.godot/
