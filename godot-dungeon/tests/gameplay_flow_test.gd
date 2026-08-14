@@ -10,6 +10,10 @@ func _initialize() -> void:
     await process_frame
 
     _expect(game._enemy_director.living_enemies().size() == 10, "Expected ten spawned enemies")
+    _expect(game._items.size() == 6, "Expected six item types in the dungeon")
+    for item in game._items:
+        _expect(item.cell != game.dungeon.start and item.cell != game.dungeon.goal, "Items must not occupy start or goal")
+        _expect(game._enemy_director.enemy_at(item.cell) == null, "Items must not overlap enemies")
     var initial_facing: int = game.facing
     var initial_revision: int = game.revision
     game.call("_turn", 1)
@@ -27,7 +31,7 @@ func _initialize() -> void:
 
     _expect(moved, "The start cell needs at least one free passage")
     _expect(game.dungeon.explored_count() >= 2, "Moving to a passage must update exploration")
-    print("Gameplay flow test passed: scene, combat HUD, enemy roster, turn, and move")
+    print("Gameplay flow test passed: scene, combat HUD, enemy roster, six item models, turn, and move")
     quit(0)
 
 

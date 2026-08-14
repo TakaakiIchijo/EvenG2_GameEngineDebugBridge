@@ -152,6 +152,10 @@ godot --headless --path godot-sample \
 
 `godot-dungeon/`は、13×13の完全迷路をシードから生成する一人称3D探索ゲームです。プレイヤーは銃を使い、移動・攻撃方法の異なる雑魚7種、中ボス2種、出口を守るボス1種と対戦します。敵は開始地点から距離を取って出現し、出口へ到達するにはボスを撃破する必要があります。
 
+画面は暗い炭色と砂岩色を基調とし、暖色の方向光、320×180相当のnearest補間、控えめな色数削減・ディザ・走査線で低解像度の質感を付与します。HUDは別レイヤーに配置するため、この画面処理で文字の可読性を損ないません。戦闘時は画面をわずかに脱彩します。
+
+ダンジョンには、弾薬箱、医療アンプル、鍵の欠片、データカセット、電力セル、祭壇コアの6種類の低ポリゴンアイテムが出現します。各アイテムは背景から区別できる色と形状を持ち、回収時に弾薬・HP・進行情報などを更新します。
+
 ```bash
 # ローカルブリッジを起動済みにしてから、Godotエディタで
 # godot-dungeon/project.godot をImportしてMain.tscnを実行します。
@@ -173,6 +177,7 @@ godot --path godot-dungeon -- --bridge-url=ws://127.0.0.1:8766
 godot --headless --path godot-dungeon --script res://tests/dungeon_generation_test.gd
 godot --headless --path godot-dungeon --script res://tests/enemy_encounter_test.gd
 godot --headless --path godot-dungeon --script res://tests/gameplay_flow_test.gd
+godot --headless --path godot-dungeon --script res://tests/item_pickup_test.gd
 ```
 
 Simulatorでは、GodotからのミニマップJSON受信、画像更新APIの`success`、状態テキスト更新APIの成功を確認しました。SimulatorのG2スクリーンショットには画像コンテナが描画されない挙動があったため、グラス上でのミニマップの最終的な可視性と連続画像更新は、実機でLocal Testingを行って確認してください。[4]
@@ -352,6 +357,10 @@ godot --headless --path godot-sample \
 
 `godot-dungeon/` is a first-person 3D exploration game that generates a seeded 13×13 perfect maze. The player uses a gun against seven minion types, two midbosses, and one boss guarding the exit. Enemies spawn away from the start position; the exit remains blocked until the boss is defeated.
 
+The visual direction uses charcoal and sandstone as its base, warm directional lighting, nearest-neighbour sampling at an effective 320×180 resolution, plus restrained colour quantisation, dithering, and scanlines. HUD elements render on a separate layer so this treatment does not reduce text readability. Combat briefly desaturates the scene.
+
+Six low-poly pickup types appear in the dungeon: ammo box, medical ampoule, key fragment, data cassette, power cell, and altar core. Each uses a distinct silhouette and accent colour, and its pickup updates ammunition, health, or progression information.
+
 ```bash
 # Start the local bridge first, then import godot-dungeon/project.godot in Godot.
 # Command-line example:
@@ -372,6 +381,7 @@ The minimap includes walls, unexplored cells, explored cells, the goal, and the 
 godot --headless --path godot-dungeon --script res://tests/dungeon_generation_test.gd
 godot --headless --path godot-dungeon --script res://tests/enemy_encounter_test.gd
 godot --headless --path godot-dungeon --script res://tests/gameplay_flow_test.gd
+godot --headless --path godot-dungeon --script res://tests/item_pickup_test.gd
 ```
 
 Simulator validation confirmed receipt of the Godot minimap JSON plus successful image-update and status-text-update API responses. Its G2 screenshot did not visibly render the image container, so final minimap visibility and continuous image updates must be confirmed in Local Testing on physical glasses. [4]

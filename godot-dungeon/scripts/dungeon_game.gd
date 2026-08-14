@@ -15,6 +15,7 @@ const MAGAZINE_SIZE := 12
 const DIRECTIONS := [Vector2i(0, -1), Vector2i(1, 0), Vector2i(0, 1), Vector2i(-1, 0)]
 const EnemyDirectorScript = preload("res://scripts/enemy_director.gd")
 const DungeonBridgeClientScript = preload("res://scripts/dungeon_bridge_client.gd")
+const DungeonItemScript = preload("res://scripts/dungeon_item.gd")
 
 enum GameState { EXPLORING, CLEARED }
 
@@ -24,7 +25,9 @@ enum GameState { EXPLORING, CLEARED }
 
 @onready var _maze_root: Node3D = %MazeRoot
 @onready var _enemy_root: Node3D = %EnemyRoot
+@onready var _item_root: Node3D = %ItemRoot
 @onready var _player_rig: Node3D = %PlayerRig
+@onready var _retro_filter: ColorRect = $PostFX/RetroFilter
 @onready var _status_label: Label = %StatusLabel
 @onready var _seed_label: Label = %SeedLabel
 @onready var _minimap_label: Label = %MinimapLabel
@@ -47,13 +50,16 @@ var _floor_material: StandardMaterial3D
 var _goal_material: StandardMaterial3D
 var _enemy_director: Variant
 var _enemy_visuals: Dictionary = {}
+var _items: Array[Variant] = []
+var _item_visuals: Dictionary = {}
 var _bridge_client: Variant
+var _combat_desaturation := 0.0
 
 
 func _ready() -> void:
-    _wall_material = _make_material(Color("284568"), 0.72, 0.0)
-    _floor_material = _make_material(Color("122033"), 0.9, 0.05)
-    _goal_material = _make_material(Color("f4ba49"), 0.35, 0.45)
+    _wall_material = _make_material(Color("3b3026"), 0.88, 0.0)
+    _floor_material = _make_material(Color("17130f"), 0.96, 0.0)
+    _goal_material = _make_emissive_material(Color("8cb7be"), 0.5, 0.0, 0.42)
     _enemy_director = EnemyDirectorScript.new()
     _bridge_client = DungeonBridgeClientScript.new()
     _bridge_client.connection_changed.connect(_on_bridge_connection_changed)
@@ -98,7 +104,7 @@ func new_dungeon(seed_override: int = 0) -> void:
 
     dungeon = DungeonMap.new(dungeon_width, dungeon_height, actual_seed)
     player_cell = dungeon.start
-    facing = 0
+    facing = _initial_facing_for_start()
     revision = 0
     game_state = GameState.EXPLORING
     health = MAX_HEALTH
@@ -106,7 +112,9 @@ func new_dungeon(seed_override: int = 0) -> void:
     reserve_ammo = 48
     _rebuild_maze_geometry()
     _enemy_director.create_encounter(dungeon)
+    _create_items()
     _rebuild_enemy_visuals()
+    _rebuild_item_visuals()
     _snap_player_to_cell()
     _update_ui("新しいダンジョンを生成しました")
     _emit_minimap()
@@ -123,7 +131,8 @@ func _shoot() -> void:
 
     ammo -= 1
     _weapon_flash_timer = 0.08
-    _weapon_light.light_energy = 10.0
+    _weapon_light.light_energy = 7.5
+    _combat_desaturation = 0.18
     var direction: Vector2i = DIRECTIONS[facing]
     shot_fired.emit(player_cell, direction, WEAPON_DAMAGE)
     var result: Dictionary = _enemy_director.take_shot(dungeon, player_cell, direction, WEAPON_DAMAGE)
@@ -166,6 +175,13 @@ func _process(delta: float) -> void:
         _weapon_flash_timer = maxf(0.0, _weapon_flash_timer - delta)
         if _weapon_flash_timer == 0.0:
             _weapon_light.light_energy = 0.0
+    _combat_desaturation = move_toward(_combat_desaturation, 0.0, delta * 1.5)
+    var retro_material := _retro_filter.material as ShaderMaterial
+    if retro_material != null:
+        retro_material.set_shader_parameter("combat_desaturation", _combat_desaturation)
+    for visual in _item_visuals.values():
+        if visual is Node3D:
+            visual.rotate_y(delta * 0.72)
 
 
 func _exit_tree() -> void:
@@ -189,6 +205,14 @@ func _read_bridge_url_from_arguments() -> String:
     return "ws://127.0.0.1:8766"
 
 
+func _initial_facing_for_start() -> int:
+    for direction_index in range(DIRECTIONS.size()):
+        var direction: Vector2i = DIRECTIONS[direction_index]
+        if dungeon.can_move(dungeon.start, direction):
+            return direction_index
+    return 0
+
+
 func _try_move(direction: Vector2i) -> void:
     var next: Vector2i = player_cell + direction
     if not dungeon.can_move(player_cell, direction):
@@ -202,6 +226,7 @@ func _try_move(direction: Vector2i) -> void:
 
     player_cell = next
     var discovered_new_cell := dungeon.mark_explored(player_cell)
+    var collected_message := _collect_item_at_player()
     revision += 1
     _animate_player_to_cell()
 
@@ -209,6 +234,8 @@ func _try_move(direction: Vector2i) -> void:
         game_state = GameState.CLEARED
         _update_ui("脱出成功。Rキーで新しい迷路を生成できます")
         game_state_changed.emit(_state_name())
+    elif not collected_message.is_empty():
+        _update_ui(collected_message)
     elif discovered_new_cell:
         _update_ui("新しい区画を探索しました")
     else:
@@ -256,8 +283,8 @@ func _rebuild_maze_geometry() -> void:
     _maze_root.add_child(goal_marker)
 
     var goal_light := OmniLight3D.new()
-    goal_light.light_color = Color("ffd166")
-    goal_light.light_energy = 2.5
+    goal_light.light_color = Color("a9d7e3")
+    goal_light.light_energy = 1.45
     goal_light.omni_range = 5.0
     goal_light.position = goal_marker.position + Vector3(0.0, 1.0, 0.0)
     _maze_root.add_child(goal_light)
@@ -296,10 +323,147 @@ func _rebuild_enemy_visuals() -> void:
             minion_mesh.height = 1.04
             visual.mesh = minion_mesh
 
-        visual.material_override = _make_material(enemy.color, 0.45, 0.15)
+        visual.material_override = _make_emissive_material(enemy.color, 0.72, 0.0, 0.12 if enemy.role == "minion" else 0.22)
         visual.position = _cell_to_world(enemy.cell) + Vector3(0.0, _enemy_visual_height(enemy), 0.0)
         _enemy_root.add_child(visual)
         _enemy_visuals[enemy.id] = visual
+
+
+func _create_items() -> void:
+    _items.clear()
+    var item_kinds := [
+        DungeonItem.Kind.AMMO_BOX,
+        DungeonItem.Kind.MED_AMPOULE,
+        DungeonItem.Kind.KEY_FRAGMENT,
+        DungeonItem.Kind.DATA_CASSETTE,
+        DungeonItem.Kind.POWER_CELL,
+        DungeonItem.Kind.ALTAR_CORE,
+    ]
+    var candidates: Array[Vector2i] = []
+    for y in range(dungeon.height):
+        for x in range(dungeon.width):
+            var cell := Vector2i(x, y)
+            if not dungeon.is_walkable(cell) or cell == dungeon.start or cell == dungeon.goal:
+                continue
+            if _enemy_director.enemy_at(cell) == null:
+                candidates.append(cell)
+    var rng := RandomNumberGenerator.new()
+    rng.seed = int(dungeon.seed_value) ^ 0x2A67D9
+    for item_index in range(item_kinds.size()):
+        if candidates.is_empty():
+            break
+        var pick_index := rng.randi_range(0, candidates.size() - 1)
+        var cell: Vector2i = candidates[pick_index]
+        candidates.remove_at(pick_index)
+        _items.append(DungeonItemScript.new(item_index + 1, item_kinds[item_index], cell))
+
+
+func _rebuild_item_visuals() -> void:
+    for child in _item_root.get_children():
+        child.queue_free()
+    _item_visuals.clear()
+    for item in _items:
+        var root := Node3D.new()
+        root.position = _cell_to_world(item.cell) + Vector3(0.0, 0.18, 0.0)
+        _item_root.add_child(root)
+        _item_visuals[item.id] = root
+        _build_item_model(root, item)
+
+
+func _build_item_model(root: Node3D, item: Variant) -> void:
+    var accent: Color = item.accent_color()
+    var base_material := _make_material(Color("28201a"), 0.78, 0.0)
+    var glow_material := _make_emissive_material(accent, 0.46, 0.08, 0.52)
+
+    match item.kind:
+        DungeonItem.Kind.AMMO_BOX:
+            _add_box_piece(root, Vector3(0.72, 0.36, 0.52), Vector3(0.0, 0.18, 0.0), base_material)
+            for offset in [-0.22, 0.0, 0.22]:
+                _add_cylinder_piece(root, 0.07, 0.07, 0.48, Vector3(offset, 0.56, 0.0), glow_material)
+        DungeonItem.Kind.MED_AMPOULE:
+            _add_cylinder_piece(root, 0.2, 0.16, 0.7, Vector3(0.0, 0.35, 0.0), glow_material)
+            _add_box_piece(root, Vector3(0.22, 0.12, 0.22), Vector3(0.0, 0.76, 0.0), base_material)
+        DungeonItem.Kind.KEY_FRAGMENT:
+            _add_cylinder_piece(root, 0.28, 0.28, 0.18, Vector3(0.0, 0.3, 0.0), glow_material)
+            _add_box_piece(root, Vector3(0.12, 0.52, 0.12), Vector3(0.0, 0.55, 0.0), glow_material)
+        DungeonItem.Kind.DATA_CASSETTE:
+            _add_box_piece(root, Vector3(0.62, 0.16, 0.48), Vector3(0.0, 0.28, 0.0), base_material)
+            _add_box_piece(root, Vector3(0.4, 0.04, 0.26), Vector3(0.0, 0.39, 0.0), glow_material)
+        DungeonItem.Kind.POWER_CELL:
+            _add_cylinder_piece(root, 0.24, 0.24, 0.84, Vector3(0.0, 0.42, 0.0), base_material)
+            _add_cylinder_piece(root, 0.15, 0.15, 0.72, Vector3(0.0, 0.44, 0.0), glow_material)
+        DungeonItem.Kind.ALTAR_CORE:
+            _add_cylinder_piece(root, 0.54, 0.34, 0.38, Vector3(0.0, 0.19, 0.0), base_material)
+            _add_sphere_piece(root, 0.34, Vector3(0.0, 0.68, 0.0), glow_material)
+
+    if item.kind == DungeonItem.Kind.POWER_CELL or item.kind == DungeonItem.Kind.ALTAR_CORE:
+        var light := OmniLight3D.new()
+        light.light_color = accent
+        light.light_energy = 0.72
+        light.omni_range = 3.0
+        light.position = Vector3(0.0, 0.8, 0.0)
+        root.add_child(light)
+
+
+func _collect_item_at_player() -> String:
+    for item in _items:
+        if item.is_collected or item.cell != player_cell:
+            continue
+        item.is_collected = true
+        var visual: Node3D = _item_visuals.get(item.id)
+        if visual != null:
+            visual.visible = false
+        match item.kind:
+            DungeonItem.Kind.AMMO_BOX:
+                reserve_ammo += 12
+                return "弾薬箱を回収。予備弾が12増加しました"
+            DungeonItem.Kind.MED_AMPOULE:
+                health = mini(MAX_HEALTH, health + 25)
+                return "医療アンプルを使用。HPを回復しました"
+            DungeonItem.Kind.KEY_FRAGMENT:
+                return "鍵の欠片を回収しました"
+            DungeonItem.Kind.DATA_CASSETTE:
+                return "データカセットを回収しました"
+            DungeonItem.Kind.POWER_CELL:
+                return "電力セルを回収。周辺照明を確認しました"
+            DungeonItem.Kind.ALTAR_CORE:
+                return "祭壇コアを回収。危険な残響が消えました"
+    return ""
+
+
+func _add_box_piece(root: Node3D, size: Vector3, position: Vector3, material: Material) -> void:
+    var visual := MeshInstance3D.new()
+    var mesh := BoxMesh.new()
+    mesh.size = size
+    visual.mesh = mesh
+    visual.material_override = material
+    visual.position = position
+    root.add_child(visual)
+
+
+func _add_cylinder_piece(root: Node3D, top_radius: float, bottom_radius: float, height: float, position: Vector3, material: Material) -> void:
+    var visual := MeshInstance3D.new()
+    var mesh := CylinderMesh.new()
+    mesh.top_radius = top_radius
+    mesh.bottom_radius = bottom_radius
+    mesh.height = height
+    visual.mesh = mesh
+    visual.material_override = material
+    visual.position = position
+    root.add_child(visual)
+
+
+func _add_sphere_piece(root: Node3D, radius: float, position: Vector3, material: Material) -> void:
+    var visual := MeshInstance3D.new()
+    var mesh := SphereMesh.new()
+    mesh.radius = radius
+    mesh.height = radius * 2.0
+    mesh.radial_segments = 8
+    mesh.rings = 4
+    visual.mesh = mesh
+    visual.material_override = material
+    visual.position = position
+    root.add_child(visual)
 
 
 func _refresh_enemy_visuals() -> void:
@@ -378,4 +542,12 @@ func _make_material(color: Color, roughness_value: float, metallic_value: float)
     material.albedo_color = color
     material.roughness = roughness_value
     material.metallic = metallic_value
+    return material
+
+
+func _make_emissive_material(color: Color, roughness_value: float, metallic_value: float, emission_energy: float) -> StandardMaterial3D:
+    var material := _make_material(color, roughness_value, metallic_value)
+    material.emission_enabled = true
+    material.emission = color
+    material.emission_energy_multiplier = emission_energy
     return material
